@@ -1,0 +1,119 @@
+{
+  "default_headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9"
+  },
+  "sites": [
+    {
+      "name": "NetTruyen",
+      "domain": "nettruyen",
+      "headers": {
+        "Referer": "https://nettruyen.gg/"
+      },
+      "selectors": {
+        "comic_title": "h1.title-detail, h1",
+        "chapter_list": "div.list-chapter a, ul.list-chapter a, .chapter a, a[href*='/chuong-']",
+        "chapter_title": "text",
+        "page_images": "div.page-chapter img, div.reading-detail img, .reading img",
+        "image_url_attributes": ["data-original", "data-src", "src"]
+      }
+    },
+    {
+      "name": "Manganato / MangaKakalot / Chapmanganato",
+      "domain": "manganato",
+      "headers": {
+        "Referer": "https://manganato.com/"
+      },
+      "selectors": {
+        "comic_title": "div.story-info-right h1, h1.title-manga",
+        "chapter_list": "ul.row-content-chapter li a, a.chapter-name",
+        "chapter_title": "text",
+        "page_images": "div.container-chapter-reader img",
+        "image_url_attributes": ["src", "data-src"]
+      }
+    },
+    {
+      "name": "MangaKakalot",
+      "domain": "mangakakalot",
+      "headers": {
+        "Referer": "https://mangakakalot.com/"
+      },
+      "selectors": {
+        "comic_title": "ul.manga-info-text h1, h1",
+        "chapter_list": "div.chapter-list div.row a",
+        "chapter_title": "text",
+        "page_images": "div.vng-true img, div.container-chapter-reader img",
+        "image_url_attributes": ["src", "data-src"]
+      }
+    },
+    {
+      "name": "AsuraScans / Asura Comic Format",
+      "domain": "asuracomic",
+      "headers": {
+        "Referer": "https://asuracomic.net/"
+      },
+      "selectors": {
+        "comic_title": "h1.text-xl, h1.font-bold, h1",
+        "chapter_list": "a[href*='/chapter/']",
+        "chapter_title": "text",
+        "page_images": "img[src*='chapter'], img.object-cover",
+        "image_url_attributes": ["src", "data-src"]
+      }
+    },
+    {
+      "name": "ReaperScans",
+      "domain": "reaperscans",
+      "headers": {
+        "Referer": "https://reaperscans.com/"
+      },
+      "selectors": {
+        "comic_title": "h1.text-xl, h1",
+        "chapter_list": "a[href*='/chapter/'], a[href*='/chapters/']",
+        "chapter_title": "text",
+        "page_images": "div.reading-content img, img[alt*='page']",
+        "image_url_attributes": ["src", "data-src"]
+      }
+    },
+    {
+      "name": "FlameComics",
+      "domain": "flamecomics",
+      "headers": {
+        "Referer": "https://flamecomics.com/"
+      },
+      "selectors": {
+        "comic_title": "h1.entry-title, h1",
+        "chapter_list": "div.eplister a, ul.clist a",
+        "chapter_title": "text",
+        "page_images": "div#readerarea img",
+        "image_url_attributes": ["src", "data-src"]
+      }
+    },
+    {
+      "name": "ComicK",
+      "domain": "comick",
+      "headers": {
+        "Referer": "https://comick.io/"
+      },
+      "selectors": {
+        "comic_title": "h1",
+        "chapter_list": "a[href*='/chapter/']",
+        "chapter_title": "text",
+        "page_images": "img.read-img, img[alt*='page']",
+        "image_url_attributes": ["src", "data-src"]
+      }
+    },
+    {
+      "name": "Generic WP-Manga / Madara Theme",
+      "domain": "madara",
+      "headers": {},
+      "selectors": {
+        "comic_title": "div.post-title h1, h1.entry-title",
+        "chapter_list": "li.wp-manga-chapter a",
+        "chapter_title": "text",
+        "page_images": "div.reading-content img, div.page-break img",
+        "image_url_attributes": ["src", "data-src"]
+      }
+    }
+  ]
+}
