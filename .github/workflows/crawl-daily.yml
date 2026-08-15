@@ -1,0 +1,38 @@
+name: Daily Comic Crawl
+
+on:
+  schedule:
+    # 00:00 UTC = 07:00 UTC+7
+    - cron: '0 0 * * *'
+  workflow_dispatch: # manual trigger
+
+jobs:
+  crawl-and-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run crawler update
+        run: |
+          mkdir -p downloads
+          python main.py update -o downloads -f cbz
+
+      - name: Sync to R2
+        if: success()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: auto
+        run: |
+          aws s3 sync ./downloads/ s3://${{ secrets.R2_BUCKET_NAME }}/ \
+            --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
