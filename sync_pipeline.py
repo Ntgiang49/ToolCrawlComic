@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Sync pipeline: scan downloads → upload R2 → upsert Supabase → Discord notify."""
 
+import boto3
 import json
 import os
 import re
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -194,20 +194,20 @@ def chapter_exists(story_id: str, chapter_number: int) -> bool:
 
 
 def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
-    """Sync local chapter directory to R2 via AWS CLI."""
+    """Upload chapter images to R2 via boto3 (credentials from env)."""
     endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-    cmd = [
-        "aws", "s3", "sync",
-        str(local_dir),
-        f"s3://{R2_BUCKET}/{r2_prefix}",
-        "--endpoint-url", endpoint,
-    ]
     if DRY_RUN:
-        print(f"  [DRY-RUN] Would run: {' '.join(cmd)}")
+        print(f"  [DRY-RUN] Would upload {local_dir} to s3://{R2_BUCKET}/{r2_prefix}")
         return True
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  ERROR uploading: {result.stderr}", file=sys.stderr)
+    client = boto3.session.Session().client(
+        "s3", endpoint_url=endpoint, region_name="auto"
+    )
+    try:
+        for img in local_dir.iterdir():
+            if img.is_file():
+                client.upload_file(str(img), R2_BUCKET, f"{r2_prefix}/{img.name}")
+    except Exception as e:
+        print(f"  ERROR uploading: {e}", file=sys.stderr)
         return False
     return True
 
