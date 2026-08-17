@@ -2,12 +2,18 @@
 """Sync pipeline: scan downloads → upload R2 → upsert Supabase → Discord notify."""
 
 import boto3
+import io
 import json
 import os
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+if sys.stdout and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr and hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 import requests
 
@@ -16,6 +22,8 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 R2_BUCKET = os.environ.get("R2_BUCKET_NAME", "comic")
 R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
 R2_PUBLIC_URL = os.environ.get(
     "R2_PUBLIC_URL",
     "https://pub-006586cb2a0d4198bcd302b9b8f8ea45.r2.dev",
@@ -200,7 +208,11 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
         print(f"  [DRY-RUN] Would upload {local_dir} to s3://{R2_BUCKET}/{r2_prefix}")
         return True
     client = boto3.session.Session().client(
-        "s3", endpoint_url=endpoint, region_name="auto"
+        "s3",
+        endpoint_url=endpoint,
+        region_name="auto",
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
     )
     try:
         for img in local_dir.iterdir():
