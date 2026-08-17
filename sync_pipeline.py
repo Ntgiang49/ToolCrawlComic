@@ -27,6 +27,11 @@ DRY_RUN = "--dry-run" in sys.argv
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
+def sb_enabled() -> bool:
+    """Supabase DB ops only when URL + service key present."""
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
@@ -283,8 +288,10 @@ def main() -> None:
             f"/ch_{first_ch['number']}/{first_ch['images'][0].name}"
         )
 
-        story_id = get_or_create_story(title, slug, cover_url)
-        if not story_id:
+        # ponytail: no Supabase → dedupe relies on aws s3 sync idempotence +
+        # local skip-existing. Ceiling: re-upload if R2 objects deleted.
+        story_id = get_or_create_story(title, slug, cover_url) if sb_enabled() else None
+        if sb_enabled() and not story_id:
             print("  ERROR: Could not get/create story")
             continue
 
@@ -292,7 +299,7 @@ def main() -> None:
             ch_num = ch["number"]
 
             # Check DB first (source of truth)
-            if not DRY_RUN and chapter_exists(story_id, ch_num):
+            if sb_enabled() and not DRY_RUN and chapter_exists(story_id, ch_num):
                 continue  # silent skip — expected for existing chapters
 
             r2_prefix = f"chapters/{slug}/ch_{ch_num}"
@@ -312,7 +319,7 @@ def main() -> None:
             )
 
             # Insert chapter
-            if not DRY_RUN:
+            if sb_enabled() and not DRY_RUN:
                 try:
                     supabase_post(
                         "chapters",
