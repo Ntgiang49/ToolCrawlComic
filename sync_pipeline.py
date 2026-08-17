@@ -215,13 +215,8 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
 # ── Discord ──────────────────────────────────────────────────────────
 
 
-def send_discord(summary: list[dict]) -> None:
-    """Send Discord webhook with upload summary."""
-    if not DISCORD_WEBHOOK:
-        print("DISCORD_WEBHOOK_URL not set, skipping notification")
-        return
-
-    # Group by comic
+def build_discord_payload(summary: list[dict]) -> dict:
+    """Pure Discord embed payload from sync summary."""
     comics: dict[str, list[str]] = {}
     for item in summary:
         comics.setdefault(item["comic"], []).append(item["chapter"])
@@ -232,17 +227,31 @@ def send_discord(summary: list[dict]) -> None:
             {"name": name, "value": ", ".join(chapters[:10]), "inline": False}
         )
 
-    payload = {
+    if summary:
+        description = f"Uploaded {len(summary)} new chapter(s)"
+    else:
+        description = "No new chapters today"
+
+    return {
         "embeds": [
             {
                 "title": "📚 Comic Crawler Report",
-                "description": f"Uploaded {len(summary)} new chapter(s)",
+                "description": description,
                 "color": 5763719,
                 "fields": fields,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         ]
     }
+
+
+def send_discord(summary: list[dict]) -> None:
+    """Send Discord webhook with upload summary (always sends, even empty)."""
+    if not DISCORD_WEBHOOK:
+        print("DISCORD_WEBHOOK_URL not set, skipping notification")
+        return
+
+    payload = build_discord_payload(summary)
 
     if DRY_RUN:
         print(f"[DRY-RUN] Discord payload:\n{json.dumps(payload, indent=2)}")
@@ -351,11 +360,8 @@ def main() -> None:
     print(f"\n{'=' * 40}")
     print(f"Total new chapters: {len(summary)}")
 
-    if summary:
-        send_discord(summary)
-        print("Discord notification sent")
-    else:
-        print("No new chapters — skipping Discord")
+    send_discord(summary)
+    print("Discord notification sent")
 
 
 if __name__ == "__main__":

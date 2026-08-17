@@ -28,5 +28,26 @@ class TestSupabaseOptional(unittest.TestCase):
         sp.SUPABASE_KEY = "k"
         self.assertTrue(sp.sb_enabled())
 
+
+class TestDiscordPayload(unittest.TestCase):
+    def test_payload_empty_summary(self):
+        payload = sp.build_discord_payload([])
+        desc = payload["embeds"][0]["description"]
+        self.assertEqual(desc, "No new chapters today")
+
+    def test_payload_groups_by_comic(self):
+        payload = sp.build_discord_payload([
+            {"comic": "A", "chapter": "Ch 1"},
+            {"comic": "A", "chapter": "Ch 2"},
+            {"comic": "B", "chapter": "Ch 1"},
+        ])
+        fields = {f["name"]: f["value"] for f in payload["embeds"][0]["fields"]}
+        self.assertEqual(fields["A"], "Ch 1, Ch 2")
+        self.assertEqual(fields["B"], "Ch 1")
+
+    def test_payload_reports_count(self):
+        payload = sp.build_discord_payload([{"comic": "A", "chapter": "Ch 1"}])
+        self.assertEqual(payload["embeds"][0]["description"], "Uploaded 1 new chapter(s)")
+
 if __name__ == '__main__':
     unittest.main()
