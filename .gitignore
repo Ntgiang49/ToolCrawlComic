@@ -1,2 +1,8 @@
 secrets.env
 downloads/
+
+__pycache__/
+*.pyc
+sync.log
+sync.err
+crawl_daily.log
