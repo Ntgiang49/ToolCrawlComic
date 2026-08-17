@@ -11,9 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 if sys.stdout and hasattr(sys.stdout, 'buffer'):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', write_through=True)
 if sys.stderr and hasattr(sys.stderr, 'buffer'):
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', write_through=True)
 
 import requests
 
@@ -76,6 +76,13 @@ def scan_downloads(downloads: Path) -> list[dict]:
 
         title = comic_dir.name
         slug = slugify(title)
+        author = "Unknown"
+        meta_path = comic_dir / "meta.json"
+        if meta_path.is_file():
+            try:
+                author = json.loads(meta_path.read_text(encoding="utf-8")).get("author", "Unknown")
+            except (json.JSONDecodeError, OSError):
+                pass
         chapters = []
 
         for ch_dir in sorted(comic_dir.iterdir()):
@@ -102,7 +109,7 @@ def scan_downloads(downloads: Path) -> list[dict]:
 
         if chapters:
             comics.append(
-                {"title": title, "slug": slug, "dir": comic_dir, "chapters": chapters}
+                {"title": title, "slug": slug, "author": author, "dir": comic_dir, "chapters": chapters}
             )
 
     return comics
@@ -124,7 +131,8 @@ def _sb_headers(*, want_return: bool = False) -> dict:
 
 def supabase_get(table: str, params: dict) -> list:
     resp = requests.get(
-        f"{SUPABASE_URL}/rest/v1/{table}", headers=_sb_headers(), params=params
+        f"{SUPABASE_URL}/rest/v1/{table}", headers=_sb_headers(), params=params,
+        timeout=30,
     )
     resp.raise_for_status()
     return resp.json()
@@ -135,13 +143,14 @@ def supabase_post(table: str, data: dict) -> list:
         f"{SUPABASE_URL}/rest/v1/{table}",
         headers=_sb_headers(want_return=True),
         json=data,
+        timeout=30,
     )
     resp.raise_for_status()
     return resp.json()
 
 
 def get_or_create_story(
-    title: str, slug: str, cover_url: str | None
+    title: str, slug: str, cover_url: str | None, author: str = "AutoCrawler"
 ) -> str | None:
     """Get existing story ID by slug, or create new. Returns UUID string."""
     existing = supabase_get("stories", {"slug": f"eq.{slug}", "select": "id"})
@@ -159,7 +168,7 @@ def get_or_create_story(
                 "title": title,
                 "slug": slug,
                 "status": "published",
-                "author": "AutoCrawler",
+                "author": author,
                 "cover_url": cover_url,
             },
         )
@@ -178,7 +187,7 @@ def get_or_create_story(
                     "title": title,
                     "slug": new_slug,
                     "status": "published",
-                    "author": "AutoCrawler",
+                    "author": author,
                     "cover_url": cover_url,
                 },
             )
@@ -201,6 +210,8 @@ def chapter_exists(story_id: str, chapter_number: int) -> bool:
 # ── R2 Upload ────────────────────────────────────────────────────────
 
 
+# ponytail: head_object skip → reruns cheap; costs 1 HEAD per image per run.
+# Upgrade path: batch list_objects once per prefix if image counts grow 10x.
 def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
     """Upload chapter images to R2 via boto3 (credentials from env)."""
     endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
@@ -216,8 +227,15 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
     )
     try:
         for img in local_dir.iterdir():
-            if img.is_file():
-                client.upload_file(str(img), R2_BUCKET, f"{r2_prefix}/{img.name}")
+            if not img.is_file():
+                continue
+            key = f"{r2_prefix}/{img.name}"
+            try:
+                client.head_object(Bucket=R2_BUCKET, Key=key)
+                continue  # already uploaded
+            except client.exceptions.ClientError:
+                pass
+            client.upload_file(str(img), R2_BUCKET, key)
     except Exception as e:
         print(f"  ERROR uploading: {e}", file=sys.stderr)
         return False
@@ -269,7 +287,7 @@ def send_discord(summary: list[dict]) -> None:
         print(f"[DRY-RUN] Discord payload:\n{json.dumps(payload, indent=2)}")
         return
 
-    resp = requests.post(DISCORD_WEBHOOK, json=payload)
+    resp = requests.post(DISCORD_WEBHOOK, json=payload, timeout=30)
     if resp.status_code not in (200, 204):
         print(
             f"Discord webhook failed: {resp.status_code} {resp.text}",
@@ -311,7 +329,7 @@ def main() -> None:
 
         # ponytail: no Supabase → dedupe relies on aws s3 sync idempotence +
         # local skip-existing. Ceiling: re-upload if R2 objects deleted.
-        story_id = get_or_create_story(title, slug, cover_url) if sb_enabled() else None
+        story_id = get_or_create_story(title, slug, cover_url, comic["author"]) if sb_enabled() else None
         if sb_enabled() and not story_id:
             print("  ERROR: Could not get/create story")
             continue

@@ -2,6 +2,7 @@ import argparse
 import sys
 import os
 import io
+import json
 
 # Force UTF-8 encoding for stdout/stderr to support Vietnamese & unicode comic titles safely
 if sys.stdout and hasattr(sys.stdout, 'buffer'):
@@ -38,6 +39,9 @@ def sync_single_comic(crawler: ComicCrawler, library: LibraryManager, url: str, 
     chapters = info["chapters"]
     out_dir = os.path.join(output_base, title)
     os.makedirs(out_dir, exist_ok=True)
+
+    with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump({"url": url, "title": title, "author": info.get("author", "Unknown")}, f, ensure_ascii=False)
 
     # Save/Update comic in library.json tracker
     library.add_or_update_comic(

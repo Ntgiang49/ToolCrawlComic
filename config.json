@@ -13,10 +13,13 @@
       },
       "selectors": {
         "comic_title": "h1.title-detail, h1",
+        "author": "li.author",
+        "author_prefix": "Tác giả",
         "chapter_list": "div.list-chapter a, ul.list-chapter a, .chapter a, a[href*='/chuong-']",
         "chapter_title": "text",
         "page_images": "div.page-chapter img, div.reading-detail img, .reading img",
-        "image_url_attributes": ["data-original", "data-src", "src"]
+        "image_url_attributes": ["data-original", "data-src", "src"],
+        "filter_same_comic": true
       }
     },
     {

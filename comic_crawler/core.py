@@ -1,6 +1,8 @@
 import os
 import re
 import time
+from urllib.parse import urlparse
+
 import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -51,16 +53,34 @@ class ComicCrawler:
         comic_title = title_elem.get_text(strip=True) if title_elem else "Unknown_Comic"
         comic_title = sanitize_filename(comic_title)
 
+        author_elem = soup.select_one(selectors.get("author", "")) if selectors.get("author") else None
+        author = author_elem.get_text(strip=True) if author_elem else "Unknown"
+        author_prefix = selectors.get("author_prefix", "")
+        if author_prefix and author.startswith(author_prefix):
+            author = author[len(author_prefix):] or "Unknown"
+
         # 2. Extract Chapter Links
         chapter_nodes = soup.select(selectors.get("chapter_list", "a[href*='chapter']"))
+        filter_same = selectors.get("filter_same_comic", False)
+        title_blacklist = selectors.get("chapter_title_blacklist", [])
+        comic_path = urlparse(url).path.rstrip("/") + "/"
         raw_chapters = []
 
         for idx, node in enumerate(chapter_nodes):
             href = node.get("href")
-            if not href:
+            if not href or href.strip() in ("#", "javascript:void(0)"):
                 continue
             abs_url = make_absolute_url(url, href)
+            if filter_same and not urlparse(abs_url).path.startswith(comic_path):
+                continue
             raw_title = node.get_text(strip=True) or f"Chapter_{idx + 1}"
+            if raw_title in title_blacklist:
+                continue
+            # UI labels with no digits ("Đọc từ đầu") → title from URL number
+            if not re.search(r"\d", raw_title):
+                m = re.search(r"chuong-([0-9.]+)", href)
+                if m:
+                    raw_title = f"Chapter {m.group(1)}"
             
             if not any(ch["url"] == abs_url for ch in raw_chapters):
                 raw_chapters.append({
@@ -83,6 +103,7 @@ class ComicCrawler:
 
         return {
             "title": comic_title,
+            "author": author,
             "chapters": chapters,
             "site_config": site_config
         }
