@@ -775,6 +775,21 @@ def main() -> None:
         print("No comics found in downloads/")
         sys.exit(0)
 
+    target_comic = None
+    if "--comic" in sys.argv:
+        idx = sys.argv.index("--comic")
+        if idx + 1 < len(sys.argv):
+            target_comic = sys.argv[idx + 1].strip().lower()
+
+    if target_comic:
+        comics = [
+            c for c in comics
+            if target_comic in c["title"].lower() or target_comic in c["slug"].lower()
+        ]
+        if not comics:
+            print(f"No matching comic found for '{target_comic}' in downloads/")
+            sys.exit(0)
+
     summary: list[dict] = []
     synced_for_prune: list[dict] = []
     items_seen = 0
