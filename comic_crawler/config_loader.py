@@ -45,7 +45,8 @@ class ConfigLoader:
                     "name": site.get("name", domain),
                     "domain": domain,
                     "headers": merged_headers,
-                    "selectors": site.get("selectors", self._get_fallback_selectors())
+                    "selectors": site.get("selectors", self._get_fallback_selectors()),
+                    "chapter_order": site.get("chapter_order", "desc")
                 }
 
         # Fallback config for unlisted sites
@@ -55,7 +56,8 @@ class ConfigLoader:
             "name": domain,
             "domain": domain,
             "headers": merged_headers,
-            "selectors": self._get_fallback_selectors()
+            "selectors": self._get_fallback_selectors(),
+            "chapter_order": "desc"
         }
 
     def _get_fallback_selectors(self) -> Dict[str, Any]:
@@ -66,6 +68,7 @@ class ConfigLoader:
             "description": ".description, .summary, .story-description, #noidungm",
             "chapter_list": "a[href*='chapter'], a[href*='ch-'], .chapter-list a, ul.clist a",
             "chapter_title": "text",
+            "chapter_title_blacklist": ["Xem thêm", "Đọc mới nhất", "Đọc từ đầu", "Read First", "Read Last", "Read Now"],
             "page_images": "div.reading-content img, div.page-break img, div.chapter-video img, #chapter-images img, article img, .manga-read img",
             "image_url_attributes": ["src", "data-src", "data-lazy-src", "data-original", "data-cdn"]
         }

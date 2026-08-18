@@ -13,7 +13,6 @@ if sys.stderr and hasattr(sys.stderr, 'buffer'):
 from comic_crawler.core import ComicCrawler
 from comic_crawler.library import LibraryManager
 from comic_crawler.exporter import ComicExporter
-from comic_crawler.utils import sanitize_filename
 
 BANNER = r"""
 =====================================================
@@ -23,7 +22,7 @@ BANNER = r"""
      |  _  | || | || | ' < (_| | | |_| |__| || \ __/ |_| \__ \ 
      |_| |_|\_,_|\_,_|_|\_\__,_|_|\__\____|\_,_|\___| .__/___/ 
                                                     |_|         
-                     COMIC CRAWLER EASY v1.2
+                     COMIC CRAWLER EASY v1.3
 =====================================================
 """
 
@@ -221,7 +220,7 @@ def main():
             convert_folder(target_path, args.format)
         else:
             print("[Error] Please specify a valid folder path: python main.py convert <FOLDER_PATH> --format cbz")
-    elif cmd.startswith("http://") or cmd.startswith("https://"):
+    elif cmd.startswith(("http://", "https://")):
         crawler = ComicCrawler(config_path=args.config, num_threads=args.threads)
         sync_single_comic(crawler, library, cmd, args.format, args.output, args.start, args.end)
     else:
