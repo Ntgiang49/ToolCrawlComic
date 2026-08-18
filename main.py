@@ -41,7 +41,13 @@ def sync_single_comic(crawler: ComicCrawler, library: LibraryManager, url: str, 
     os.makedirs(out_dir, exist_ok=True)
 
     with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump({"url": url, "title": title, "author": info.get("author", "Unknown")}, f, ensure_ascii=False)
+        json.dump({
+            "url": url,
+            "title": title,
+            "author": info.get("author", "Unknown"),
+            "category": info.get("category", "Unknown"),
+            "description": info.get("description", "")
+        }, f, ensure_ascii=False, indent=2)
 
     # Save/Update comic in library.json tracker
     library.add_or_update_comic(
