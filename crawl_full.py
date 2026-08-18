@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 from comic_crawler.core import ComicCrawler
 from comic_crawler.library import LibraryManager
+from comic_crawler.chapter_namer import ChapterNamer
 
 OUT = os.environ.get("DOWNLOADS_DIR", "downloads")
 
@@ -50,9 +51,26 @@ def main() -> None:
     if "--limit" in sys.argv:
         limit = int(sys.argv[sys.argv.index("--limit") + 1])
 
-    library = LibraryManager().get_all_comics()
+    target_url = next((arg for arg in sys.argv[1:] if arg.startswith("http://") or arg.startswith("https://")), None)
+    target_comic = None
+    if "--comic" in sys.argv:
+        idx = sys.argv.index("--comic")
+        if idx + 1 < len(sys.argv):
+            target_comic = sys.argv[idx + 1].strip().lower()
+
+    lib_manager = LibraryManager()
+    library = lib_manager.get_all_comics()
+
+    if target_url:
+        library = {target_url: {"title": target_url, "url": target_url}}
+    elif target_comic:
+        library = {
+            url: item for url, item in library.items()
+            if target_comic in item.get("title", "").lower() or target_comic in url.lower()
+        }
+
     if not library:
-        print("No comics in library.json")
+        print("No matching comics found.")
         return
 
     crawler = ComicCrawler()
@@ -62,6 +80,7 @@ def main() -> None:
             print(f"\n=== {title} ===", flush=True)
             info = crawler.parse_comic_info(url)
             site_config = info["site_config"]
+            lib_manager.add_or_update_comic(url, info["title"], export_format="images")
 
             out_dir = Path(OUT) / info["title"]
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -86,7 +105,7 @@ def main() -> None:
                 print("  No chapter numbers parsed, skipping")
                 continue
             max_n = max(nums)
-            probe_to = min(max_n + 300, 3000)
+            probe_to = max_n
             print(f"  Visible max chapter: {max_n} (page shows {len(nums)} links)")
 
             headers = dict(site_config.get("headers", {}))
@@ -99,9 +118,9 @@ def main() -> None:
             session.headers.update(headers)
 
             existing = {
-                int(m.group(1))
+                int(ChapterNamer.extract_number(d.name))
                 for d in out_dir.iterdir()
-                if d.is_dir() and (m := re.match(r"Chapter (\d+)", d.name))
+                if d.is_dir() and ChapterNamer.extract_number(d.name) is not None
             }
             print(f"  Enumeration 1..{probe_to}...")
             valid = enumerate_valid(session, url, probe_to)
@@ -113,15 +132,16 @@ def main() -> None:
             base = url.rstrip("/") + "/chuong-"
             new_count = 0
             for i, n in enumerate(missing, 1):
-                print(f"  [{i}/{len(missing)}] Chapter {n}...", flush=True)
+                ch_name = ChapterNamer.format_chapter_name(f"Chapter {n}", total_chapters=max_n)
+                print(f"  [{i}/{len(missing)}] {ch_name}...", flush=True)
                 success, msg = crawler.download_chapter(
-                    f"Chapter {n}", base + str(n), site_config, str(out_dir), "images"
+                    ch_name, base + str(n), site_config, str(out_dir), "images"
                 )
                 if success:
                     new_count += 1
-                    print(f"  [OK] Chapter {n} saved", flush=True)
+                    print(f"  [OK] {ch_name} saved", flush=True)
                 else:
-                    print(f"  [Failed] Chapter {n}: {msg}", flush=True)
+                    print(f"  [Failed] {ch_name}: {msg}", flush=True)
             print(f"  Downloaded {new_count} new chapter(s)", flush=True)
     finally:
         crawler.close()
