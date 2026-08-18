@@ -23,7 +23,24 @@ import boto3
 import requests
 from tqdm import tqdm
 
-# --- Config from env ---
+# --- Config from env & secrets.env fallback ---
+def _load_env_file(path: str = "secrets.env") -> None:
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip().strip("\"'")
+                        if k and not os.environ.get(k):
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+_load_env_file("secrets.env")
+_load_env_file(".env")
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 R2_BUCKET = os.environ.get("R2_BUCKET_NAME", "comic")
