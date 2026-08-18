@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-18
+
+### Fixed
+- **Pipeline Crash in `crawl_full.py`**: Added missing `ThreadPoolExecutor` import.
+- **Data Pollution from Navigation Links**: Implemented `chapter_title_blacklist` in parser and config to prevent downloading navigation buttons ("Đọc mới nhất", "Đọc từ đầu", "Xem thêm") as chapters.
+- **Decimal Chapter Collisions**: Updated chapter number parsing and database queries to support float chapters (e.g. Chapter 012.5) without truncating to integer.
+- **Silent Database Corruption Risk**: Implemented atomic writes (`.tmp` + `os.replace`) for `library.json`.
+
+### Added
+- **Thread-Safe R2 Uploads**: Implemented thread-local `boto3` S3 client isolation to prevent connection concurrency drops under load.
+- **R2 Continuation Pagination**: Implemented pagination support in `get_existing_r2_keys` for bucket prefixes with >1,000 objects.
+- **In-Memory Supabase Lookup Caching**: Added run-scoped caching for author, category, and genre lookups, eliminating up to 90% of redundant REST API calls.
+- **HTTP Connection Pool Scaling**: Mounted `requests.adapters.HTTPAdapter` configured to match worker thread concurrency.
+- **Automated Log Rotation**: Added size-based rotation (>5MB) in `run_daily.bat` to prevent unbounded log growth.
+- **Configurable Chapter Ordering**: Added `chapter_order` (`desc`/`asc`) to site configuration.
+- **GIF Image Support**: Added `.gif` to valid formats in `ComicExporter`.
+- **Extended Test Suite**: Added 5 new unit tests (27 total) covering pagination, context management, blacklist filtering, and `crawl_full.py`.
+
+### Changed
+- **Optimized Deduplication**: Converted chapter link collection to $O(1)$ set lookup.
+- **Refactored Exporter**: Extracted `_export_to_target` helper to eliminate duplicate export branch handling.
+- **Code Cleanups**: Removed unused imports across modules.
+
 ## [1.1.0] - 2026-08-18
 
 ### Added

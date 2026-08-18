@@ -1,232 +1,123 @@
-# Implementation Plan: Comic Crawler Pipeline Completion
+# Implementation Plan: Comic Crawler Robustness & Maintainability
 
 ## Overview
-
-Fix and complete the sync pipeline: scrape full comic metadata (author, category, description) → save to `meta.json` → upload to R2 with live CLI progress → backup to Drive via rclone → auto-prune local → upsert metadata to Supabase (`authors`, `categories` tables + FK links) → send rich Discord notification.
+This plan outlines the systematic resolution of the 16 issues identified during the robustness review of the Comic Crawler project. The goal is to harden the pipeline against silent failures, data loss, and scale issues without rewriting working systems.
 
 ## Architecture Decisions
-
-- **No new dependencies.** `tqdm` already installed → reuse for R2 upload progress. `subprocess` for rclone. `boto3` callback for upload tracking.
-- **Rclone stays external.** Call via `subprocess.run()` — already configured on user's machine, no Python wrapper needed.
-- **Prune is opt-in.** Add `--prune` flag to `sync_pipeline.py` — destructive action needs explicit consent.
-- **Category selectors are best-effort.** Each site structures genre/category differently. Scrape what's available, fallback to "Unknown".
-- **`meta.json` is the bridge.** Crawler writes it, sync pipeline reads it. No direct coupling between crawler and Supabase.
-
-## Dependency Graph
-
-```
-config.json (selectors)
-    │
-    ├── core.py (scrape author + category + description)
-    │       │
-    │       └── main.py / crawl_full.py (save extended meta.json)
-    │
-    └── sync_pipeline.py
-            │
-            ├── Task 2: Supabase upsert (authors, categories, stories)
-            ├── Task 3: R2 upload with tqdm progress
-            ├── Task 4: rclone Drive backup
-            ├── Task 5: auto-prune after confirm
-            └── Task 6: rich Discord embed
-```
+- **Vertical Slicing:** Fixes are grouped by impact area rather than file. Critical pipeline blockers (crashes and data loss) are addressed first, followed by silent failures (pagination, concurrency), and finally tech debt.
+- **Atomic Operations:** File writes (`library.json`) must be atomic to prevent corruption on crash.
+- **Fail-Fast Configuration:** Missing imports or configuration mismatches should throw immediately rather than silently doing the wrong thing.
 
 ## Task List
 
-### Phase 1: Metadata Scraping + Supabase
+### Phase 1: Critical Pipeline Blockers & Data Loss
+These tasks address issues that actively break the daily run or corrupt data.
 
----
+- [ ] **Task 1: Fix `crawl_full.py` crash**
+  - **Description:** Add the missing `ThreadPoolExecutor` import.
+  - **Acceptance criteria:** `crawl_full.py` runs without throwing a `NameError`.
+  - **Estimated scope:** XS (1 file)
 
-#### Task 1: Scrape category/description + add selectors for all sites
+- [ ] **Task 2: Fix navigation links downloaded as chapters**
+  - **Description:** Implement a blacklist filter in `core.py` and add entries to `config.json` to reject links like "Xem thêm" or "Đọc mới nhất".
+  - **Acceptance criteria:** Non-chapter navigation links are ignored and not downloaded.
+  - **Estimated scope:** S (2 files)
 
-**Description:** Extend `parse_comic_info()` in `core.py` to also scrape category/genre and description. Add `author`, `category`, `description` selectors to all 8 site configs in `config.json`. Update `meta.json` writes in `main.py` and `crawl_full.py` to include new fields.
+- [ ] **Task 3: Make `library.json` writes atomic**
+  - **Description:** Update `LibraryManager.save()` to write to a temp file first, then `os.replace`.
+  - **Acceptance criteria:** Mid-write crashes do not result in an empty or corrupted `library.json`.
+  - **Estimated scope:** XS (1 file)
 
-**Acceptance criteria:**
-- [ ] `parse_comic_info()` returns `author`, `category`, `description` keys
-- [ ] All 8 site configs in `config.json` have `author`, `category`, `description` selectors (best-effort per site)
-- [ ] `meta.json` saved with: `url`, `title`, `author`, `category`, `description`
+- [ ] **Task 4: Fix decimal chapter truncation**
+  - **Description:** Update `extract_chapter_number` in `sync_pipeline.py` to capture floats (e.g., 12.5) to prevent collisions in Supabase.
+  - **Acceptance criteria:** Decimal chapters are correctly parsed and uploaded.
+  - **Estimated scope:** XS (1 file)
 
-**Verification:**
-- [ ] Run `python main.py <NETTRUYEN_URL> --end 1` → check `meta.json` has author + category + description
-- [ ] Manual: inspect `meta.json` output for a known comic
+### Checkpoint: Foundation
+- [ ] `run_daily.bat` executes successfully end-to-end without crashes.
+- [ ] No junk chapters are downloaded.
+- [ ] `library.json` remains intact under simulated interruption.
 
-**Dependencies:** None
+### Phase 2: Silent Failures & Scale Issues
+These tasks address issues that won't crash the pipeline but cause incorrect behavior at scale.
 
-**Files likely touched:**
-- `comic_crawler/core.py` (add category + description scraping)
-- `config.json` (add selectors for all sites)
-- `main.py` (extend `meta.json` write at L43-44)
-- `crawl_full.py` (extend `meta.json` write at L65-68)
+- [ ] **Task 5: Fix thread-unsafe boto3 client**
+  - **Description:** Create a separate `boto3` client per thread in `upload_to_r2` or use `boto3.resource`.
+  - **Acceptance criteria:** Concurrent uploads do not trigger connection errors.
+  - **Estimated scope:** S (1 file)
 
-**Estimated scope:** Medium (4 files)
+- [ ] **Task 6: Handle R2 pagination**
+  - **Description:** Update `get_existing_r2_keys` to handle pagination (`IsTruncated`) for prefixes with >1000 objects.
+  - **Acceptance criteria:** All keys are retrieved even if the count exceeds 1000.
+  - **Estimated scope:** S (1 file)
 
----
+- [ ] **Task 7: Implement log rotation**
+  - **Description:** Update `run_daily.bat` to rotate `crawl_daily.log` to prevent unbounded growth.
+  - **Acceptance criteria:** Logs are rotated daily or limited in size.
+  - **Estimated scope:** XS (1 file)
 
-#### Task 2: Supabase metadata upsert — authors, categories, stories
+- [ ] **Task 8: Check/Rotate `secrets.env` (Manual)**
+  - **Description:** Check if `secrets.env` is in git history and advise the user to rotate keys if it is.
+  - **Acceptance criteria:** User is informed of potential credential leak.
+  - **Estimated scope:** XS (N/A)
 
-**Description:** In `sync_pipeline.py`, when creating/updating a story: get-or-create an `authors` row → set `author_id` on story. Get-or-create a `categories` row → set `category_id`. Set `description` from `meta.json`. Update `get_or_create_story()` to accept and upsert all metadata fields.
+### Checkpoint: Core Features
+- [ ] Large chapters upload reliably without dropping connections.
+- [ ] Existing keys are correctly identified regardless of bucket size.
 
-**Acceptance criteria:**
-- [ ] `authors` table gets a new row if author name doesn't exist, reuses existing if it does
-- [ ] `stories.author_id` FK set correctly
-- [ ] `categories` table gets a new row if category doesn't exist, reuses existing if it does
-- [ ] `stories.category_id` FK set correctly
-- [ ] `stories.description` populated from `meta.json`
-- [ ] Existing stories get metadata updated (not just on first create)
+### Phase 3: Tech Debt & Future-Proofing
+These tasks clean up fragile logic and prepare for new sites.
 
-**Verification:**
-- [ ] Run `python sync_pipeline.py --dry-run` → see correct author/category log output
-- [ ] Check Supabase `authors` table has correct rows
-- [ ] Check `stories` rows have `author_id`, `category_id`, `description` populated
+- [ ] **Task 9: Fix `requests.Session` connection leak**
+  - **Description:** Implement context manager methods (`__enter__`/`__exit__`) for `ComicCrawler`.
+  - **Acceptance criteria:** Sessions are cleanly closed after crawling.
+  - **Estimated scope:** S (2-3 files to update usage)
 
-**Dependencies:** Task 1 (needs extended `meta.json`)
+- [ ] **Task 10: Fix fragile `lxml` detection**
+  - **Description:** Replace `__dict__` check with standard `try/except ImportError` in `core.py`.
+  - **Acceptance criteria:** `lxml` is used when installed, falling back cleanly otherwise.
+  - **Estimated scope:** XS (1 file)
 
-**Files likely touched:**
-- `sync_pipeline.py` (new functions: `get_or_create_author()`, `get_or_create_category()`, update `get_or_create_story()`, update `main()` flow)
+- [ ] **Task 11: Add configurable chapter ordering**
+  - **Description:** Add `"chapter_order"` to site config to control whether to reverse the chapter list.
+  - **Acceptance criteria:** Sites listing chapters oldest-first are parsed correctly without manual code changes.
+  - **Estimated scope:** S (2 files: `core.py`, `config.json`)
 
-**Estimated scope:** Small (1 file)
+- [ ] **Task 12: Optimize duplicate deduplication**
+  - **Description:** Change O(n²) list comprehension in `parse_comic_info` to use an O(1) set lookup.
+  - **Acceptance criteria:** Parsing large chapter lists is noticeably faster.
+  - **Estimated scope:** XS (1 file)
 
----
+### Phase 4: Polish & Coverage
+- [ ] **Task 13: Align version strings**
+  - **Description:** Ensure `__init__.py` and `main.py` report the same version.
+  - **Acceptance criteria:** Version string is consistent.
+  - **Estimated scope:** XS (2 files)
 
-### Checkpoint: Phase 1
+- [ ] **Task 14: Rename shadowed `format` variable**
+  - **Description:** Rename `format` to `export_format` in `library.py` to avoid shadowing builtin.
+  - **Acceptance criteria:** Linters report no shadowing errors.
+  - **Estimated scope:** XS (1 file)
 
-- [ ] `meta.json` contains author + category + description for test comic
-- [ ] Supabase `authors` and `categories` tables populated correctly
-- [ ] `stories` table has correct FK links
-- [ ] Existing crawl/sync flow still works (no regressions)
+- [ ] **Task 15: Add `.gif` to valid exporter extensions**
+  - **Description:** Add `.gif` to `valid_exts` in `exporter.py`.
+  - **Acceptance criteria:** GIF images are successfully packed into CBZ/PDF files.
+  - **Estimated scope:** XS (1 file)
 
----
-
-### Phase 2: Upload Progress + Backup + Prune
-
----
-
-#### Task 3: R2 upload with live CLI progress
-
-**Description:** Add tqdm progress bar to `upload_to_r2()` in `sync_pipeline.py`. Show per-file upload with file name, size, and overall chapter progress. Use boto3's `upload_file` Callback param for byte-level tracking.
-
-**Acceptance criteria:**
-- [ ] CLI shows progress bar during R2 upload: `Uploading ch 5: 003.jpg [2.1MB] ████████░░ 80%`
-- [ ] Shows total bytes uploaded per chapter after completion
-- [ ] Skipped files (already exist via HEAD check) show as skipped, not uploaded
-
-**Verification:**
-- [ ] Run `python sync_pipeline.py` with a comic that has new chapters → see live progress
-- [ ] Run again (all uploaded) → see "skipped" for each file, no progress bar
-
-**Dependencies:** None (can parallel with Task 1-2)
-
-**Files likely touched:**
-- `sync_pipeline.py` (`upload_to_r2()` function)
-
-**Estimated scope:** Small (1 file)
-
----
-
-#### Task 4: Integrate rclone Drive backup into pipeline
-
-**Description:** Add `backup_to_drive()` function in `sync_pipeline.py` that calls `rclone copy` via `subprocess.run()`. Call it after R2 upload in `main()`. Add `--skip-backup` flag to opt out. Remove the rclone line from `run_daily.bat` since it moves into Python.
-
-**Acceptance criteria:**
-- [ ] `backup_to_drive()` calls `rclone copy <DOWNLOADS_DIR> gdrive:Comic --transfers 8 --fast-list`
-- [ ] Logs rclone stdout/stderr to CLI
-- [ ] Returns success/failure bool
-- [ ] `--skip-backup` flag skips Drive backup
-- [ ] `run_daily.bat` no longer has the rclone line (avoids double backup)
-
-**Verification:**
-- [ ] Run `python sync_pipeline.py` → see Drive backup log output
-- [ ] Run `python sync_pipeline.py --skip-backup` → no rclone call
-- [ ] `run_daily.bat` still works end-to-end
-
-**Dependencies:** None
-
-**Files likely touched:**
-- `sync_pipeline.py` (new `backup_to_drive()`, update `main()`)
-- `run_daily.bat` (remove rclone line)
-- `secrets.env.template` (add `RCLONE_REMOTE` var, optional)
-
-**Estimated scope:** Small (3 files)
-
----
-
-#### Task 5: Auto-prune local after R2 + Drive confirmed
-
-**Description:** Add `prune_local()` function in `sync_pipeline.py`. After both R2 upload and Drive backup succeed for a chapter, delete local chapter image folder. Only prune chapters that were successfully synced this run. Add `--prune` flag (opt-in, destructive). Keep `meta.json` and comic-level folder.
-
-**Acceptance criteria:**
-- [ ] `--prune` flag enables pruning (off by default)
-- [ ] Only prunes chapters that succeeded R2 upload AND Drive backup this run
-- [ ] Keeps `meta.json` and comic folder structure intact
-- [ ] Logs each pruned chapter: `Pruned: Comic/Chapter 005 (15 files, 42MB)`
-- [ ] Dry-run mode shows what would be pruned without deleting
-
-**Verification:**
-- [ ] Run `python sync_pipeline.py --prune --dry-run` → see "[DRY-RUN] Would prune..." messages
-- [ ] Run `python sync_pipeline.py --prune` with real data → local folders deleted, `meta.json` preserved
-
-**Dependencies:** Task 4 (needs backup confirmation before prune is safe)
-
-**Files likely touched:**
-- `sync_pipeline.py` (new `prune_local()`, update `main()` flow, track prune candidates)
-
-**Estimated scope:** Small (1 file)
-
----
-
-### Checkpoint: Phase 2
-
-- [ ] R2 upload shows live progress bar with file sizes
-- [ ] Drive backup runs automatically in pipeline
-- [ ] `--prune` deletes local chapters after confirmed sync
-- [ ] `--dry-run` still works for all new features
-- [ ] `run_daily.bat` flow unchanged from user perspective
-
----
-
-### Phase 3: Discord Notification
-
----
-
-#### Task 6: Rich Discord embed with comic/author/chapter details
-
-**Description:** Rewrite `build_discord_payload()` in `sync_pipeline.py` to include author, per-comic chapter number list, and total count. Use the summary data already collected during sync. Format matches the confirmed design from intent.
-
-**Acceptance criteria:**
-- [ ] Embed shows per-comic: title, author, list of chapter numbers, count
-- [ ] Shows total chapters across all comics
-- [ ] Handles edge cases: no new chapters → "No new chapters today", single comic, 20+ comics (truncate)
-- [ ] Embed has timestamp and color
-
-**Verification:**
-- [ ] Run `python sync_pipeline.py --dry-run` → Discord payload in stdout matches expected format
-- [ ] Send real webhook → verify Discord embed renders correctly
-
-**Dependencies:** Task 1 (needs author in summary data)
-
-**Files likely touched:**
-- `sync_pipeline.py` (`build_discord_payload()`, update summary data collection in `main()`)
-
-**Estimated scope:** Small (1 file)
-
----
+- [ ] **Task 16: Add missing tests**
+  - **Description:** Write tests for atomic library writes, missing imports, and pagination logic.
+  - **Acceptance criteria:** Test suite covers the newly implemented fixes.
+  - **Estimated scope:** M (3 files)
 
 ### Checkpoint: Complete
-
-- [ ] All 6 tasks acceptance criteria met
-- [ ] `python sync_pipeline.py --dry-run` exercises full pipeline without side effects
-- [ ] `run_daily.bat` runs full flow: crawl → sync (R2 + Supabase) → backup → Discord
-- [ ] Ready for daily use
+- [ ] All 16 tasks implemented.
+- [ ] All unit tests pass (`python -m unittest discover`).
 
 ## Risks and Mitigations
-
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Site HTML changes break selectors | Med | Fallback to "Unknown" for all metadata; existing crawl still works |
-| rclone not installed/configured | Low | `backup_to_drive()` checks for rclone binary, logs warning and continues |
-| R2 upload progress callback slows uploads | Low | Callback is lightweight (counter increment); disable if measurably slower |
-| Prune deletes data before backup completes | High | Prune is opt-in (`--prune`), only after both R2 + Drive confirmed |
-| Supabase upsert race conditions | Low | ON CONFLICT DO NOTHING for authors/categories; idempotent |
+| Thread-unsafe S3 uploads fail under load | High | Explicitly scope `boto3` clients to worker threads. |
+| Atomic write fails on cross-device link | Low | Ensure temp file and target file are on the same filesystem. |
 
 ## Open Questions
-
-None — all resolved during interview. Ready to build.
+- Do you want me to write a script to scrub `secrets.env` from your git history if it was accidentally committed?
