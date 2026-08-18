@@ -12,7 +12,7 @@ class ChapterNamer:
         """
         if not title:
             return None
-        match = re.search(r'(?:chapter|ch\.?|ch\s+)\s*(\d+(?:\.\d+)?)', title, re.IGNORECASE)
+        match = re.search(r'(?:chapter|ch\.?|ch\s+|chuong|chương)\s*(\d+(?:\.\d+)?)', title, re.IGNORECASE)
         if not match:
             match = re.search(r'\b(\d+(?:\.\d+)?)\b', title)
         

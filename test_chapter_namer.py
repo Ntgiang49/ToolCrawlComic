@@ -6,12 +6,22 @@ class TestChapterNamer(unittest.TestCase):
         self.assertEqual(ChapterNamer.extract_number("Read Chapter 12.5 online"), 12.5)
         self.assertEqual(ChapterNamer.extract_number("Chapter 001 - The Beginning"), 1.0)
         self.assertEqual(ChapterNamer.extract_number("Ch. 42"), 42.0)
+        self.assertEqual(ChapterNamer.extract_number("Chapter 0"), 0.0)
         self.assertIsNone(ChapterNamer.extract_number("Extra Bonus Story"))
+
+    def test_vietnamese_and_volume_chapter_extraction(self):
+        self.assertEqual(ChapterNamer.extract_number("Chương 45"), 45.0)
+        self.assertEqual(ChapterNamer.extract_number("Tập 2 Chương 45"), 45.0)
+        self.assertEqual(ChapterNamer.extract_number("Vol. 3 Chuong 10"), 10.0)
+        self.assertEqual(ChapterNamer.extract_number("Chương 12.5"), 12.5)
+        self.assertEqual(ChapterNamer.format_chapter_name("Tập 2 Chương 45", total_chapters=100), "Chapter 045")
 
     def test_format_padded_name(self):
         self.assertEqual(ChapterNamer.format_chapter_name("Chapter 1", total_chapters=150), "Chapter 001")
         self.assertEqual(ChapterNamer.format_chapter_name("Chapter 12.5", total_chapters=150), "Chapter 012.5")
         self.assertEqual(ChapterNamer.format_chapter_name("Chapter 5", total_chapters=20), "Chapter 005")
+        self.assertEqual(ChapterNamer.format_chapter_name("Chapter 0", total_chapters=20), "Chapter 000")
+
 
 if __name__ == "__main__":
     unittest.main()

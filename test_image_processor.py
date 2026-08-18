@@ -57,6 +57,35 @@ class TestImageProcessor(unittest.TestCase):
         self.assertEqual(processed.format, "jpeg")
         self.assertEqual(processed.height, 17000)
 
+    def test_process_grayscale_and_bilevel_modes(self):
+        # Grayscale L mode
+        img_gray = Image.new("L", (600, 900), color=128)
+        buf_gray = io.BytesIO()
+        img_gray.save(buf_gray, format="PNG")
+        processed_gray = ImageProcessor.process_image(buf_gray.getvalue())
+        self.assertEqual(processed_gray.format, "webp")
+
+        # 1-bit monochrome 1 mode
+        img_mono = Image.new("1", (600, 900), color=1)
+        buf_mono = io.BytesIO()
+        img_mono.save(buf_mono, format="PNG")
+        processed_mono = ImageProcessor.process_image(buf_mono.getvalue())
+        self.assertEqual(processed_mono.format, "webp")
+
+    def test_process_palette_mode(self):
+        img_p = Image.new("P", (500, 750))
+        buf_p = io.BytesIO()
+        img_p.save(buf_p, format="PNG")
+        processed_p = ImageProcessor.process_image(buf_p.getvalue())
+        self.assertEqual(processed_p.format, "webp")
+
+    def test_process_cmyk_mode(self):
+        img_cmyk = Image.new("CMYK", (400, 600), color=(100, 50, 0, 20))
+        buf_cmyk = io.BytesIO()
+        img_cmyk.save(buf_cmyk, format="JPEG")
+        processed_cmyk = ImageProcessor.process_image(buf_cmyk.getvalue())
+        self.assertEqual(processed_cmyk.format, "webp")
+
     def test_corrupt_bytes_rejection(self):
         with self.assertRaises(ValueError):
             ImageProcessor.process_image(b"not-an-image-corrupt-data-12345")
