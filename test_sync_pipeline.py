@@ -80,6 +80,23 @@ class TestSupabaseOperations(unittest.TestCase):
         finally:
             sp.DRY_RUN = saved_dry
 
+    @patch("sync_pipeline.supabase_get")
+    def test_get_existing_chapter_numbers_pagination(self, mock_get):
+        sp.SUPABASE_URL = "https://x.supabase.co"
+        sp.SUPABASE_KEY = "key"
+        sp.DRY_RUN = False
+
+        page1 = [{"chapter_number": i} for i in range(1, 1001)]
+        page2 = [{"chapter_number": i} for i in range(1001, 1050)]
+        mock_get.side_effect = [page1, page2]
+
+        chapters = sp.get_existing_chapter_numbers("story-123")
+        self.assertEqual(len(chapters), 1049)
+        self.assertIn(1, chapters)
+        self.assertIn(1000, chapters)
+        self.assertIn(1049, chapters)
+        self.assertEqual(mock_get.call_count, 2)
+
 
 class TestBackupAndPrune(unittest.TestCase):
     def test_backup_skip_flag(self):

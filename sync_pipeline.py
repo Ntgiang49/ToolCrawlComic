@@ -390,20 +390,36 @@ def get_or_create_story(
 
 
 def get_existing_chapter_numbers(story_id: str) -> set[float | int]:
-    """Batch fetch all existing chapter numbers for a story in 1 query."""
+    """Batch fetch all existing chapter numbers for a story with PostgREST pagination."""
     if not sb_enabled() or DRY_RUN or not story_id:
         return set()
+    existing = set()
+    limit = 1000
+    offset = 0
     try:
-        res = supabase_get("chapters", {"story_id": f"eq.{story_id}", "select": "chapter_number"})
-        existing = set()
-        for r in res:
-            if "chapter_number" in r and r["chapter_number"] is not None:
-                val = float(r["chapter_number"])
-                existing.add(int(val) if val.is_integer() else val)
+        while True:
+            res = supabase_get(
+                "chapters",
+                {
+                    "story_id": f"eq.{story_id}",
+                    "select": "chapter_number",
+                    "limit": str(limit),
+                    "offset": str(offset),
+                },
+            )
+            if not res:
+                break
+            for r in res:
+                if "chapter_number" in r and r["chapter_number"] is not None:
+                    val = float(r["chapter_number"])
+                    existing.add(int(val) if val.is_integer() else val)
+            if len(res) < limit:
+                break
+            offset += limit
         return existing
     except Exception as e:
         print(f"  [Warning] Failed to batch fetch existing chapters: {e}", file=sys.stderr)
-        return set()
+        return existing
 
 
 # ── R2 Upload ────────────────────────────────────────────────────────
@@ -414,13 +430,13 @@ _thread_local = threading.local()
 def _get_r2_client():
     """Returns a thread-local boto3 S3 client to avoid concurrency issues."""
     if not hasattr(_thread_local, "client"):
-        endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_ACCOUNT_ID else None
         _thread_local.client = boto3.session.Session().client(
             "s3",
             endpoint_url=endpoint,
             region_name="auto",
-            aws_access_key_id=R2_ACCESS_KEY_ID,
-            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            aws_access_key_id=R2_ACCESS_KEY_ID or None,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY or None,
         )
     return _thread_local.client
 
