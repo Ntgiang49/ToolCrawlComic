@@ -1,0 +1,133 @@
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+import sync_pipeline as sp
+from sync_pipeline import slugify, extract_chapter_number, scan_downloads, prune_local_chapters, backup_to_drive, build_discord_payload
+
+class TestSyncPipelineHelpers(unittest.TestCase):
+    def test_slugify(self):
+        self.assertEqual(slugify("Solo Leveling"), "solo-leveling")
+        self.assertEqual(slugify("Tomb Raider King!"), "tomb-raider-king")
+        self.assertEqual(slugify("  Spaces   Around  "), "spaces-around")
+        self.assertEqual(slugify("Võ Luyện Đỉnh Phong"), "võ-luyện-đỉnh-phong")
+
+    def test_extract_chapter_number(self):
+        self.assertEqual(extract_chapter_number("Chapter 001"), 1)
+        self.assertEqual(extract_chapter_number("Ch. 12"), 12)
+        self.assertEqual(extract_chapter_number("Chapter 012.5"), 12) # Truncates decimal
+        self.assertEqual(extract_chapter_number("Prologue"), None)
+        self.assertEqual(extract_chapter_number("Chapter 000"), None)
+
+
+class TestScanDownloads(unittest.TestCase):
+    def test_scan_with_meta_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            comic_dir = Path(tmpdir) / "Test Comic"
+            comic_dir.mkdir()
+            meta = {
+                "url": "https://nettruyen.gg/truyen/test-comic",
+                "title": "Test Comic",
+                "author": "Oda",
+                "category": "Action, Shounen",
+                "description": "Epic story"
+            }
+            (comic_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+            ch_dir = comic_dir / "Chapter 1"
+            ch_dir.mkdir()
+            (ch_dir / "001.jpg").write_bytes(b"image content")
+
+            comics = scan_downloads(Path(tmpdir))
+            self.assertEqual(len(comics), 1)
+            c = comics[0]
+            self.assertEqual(c["title"], "Test Comic")
+            self.assertEqual(c["author"], "Oda")
+            self.assertEqual(c["category"], "Action, Shounen")
+            self.assertEqual(c["description"], "Epic story")
+            self.assertEqual(c["url"], "https://nettruyen.gg/truyen/test-comic")
+            self.assertEqual(len(c["chapters"]), 1)
+            self.assertEqual(c["chapters"][0]["number"], 1)
+
+
+class TestSupabaseOperations(unittest.TestCase):
+    def test_sb_enabled_false_when_no_keys(self):
+        sp.SUPABASE_URL = ""
+        sp.SUPABASE_KEY = ""
+        self.assertFalse(sp.sb_enabled())
+
+    def test_sb_enabled_true_when_keys(self):
+        sp.SUPABASE_URL = "https://x.supabase.co"
+        sp.SUPABASE_KEY = "k"
+        self.assertTrue(sp.sb_enabled())
+
+    def test_dry_run_entity_creation(self):
+        saved_dry = sp.DRY_RUN
+        try:
+            sp.DRY_RUN = True
+            self.assertEqual(sp.get_or_create_author("Oda"), "dry-run-author-id")
+            self.assertEqual(sp.get_or_create_category("Action, Adventure"), "dry-run-category-id")
+            self.assertEqual(sp.get_or_create_genre("Shounen"), "dry-run-genre-id")
+            self.assertEqual(sp.get_or_create_crawler_source("https://example.com/comic/1"), "dry-run-source-id")
+            self.assertEqual(sp.get_or_create_story("Title", "title", None, "Oda", "Action", "Desc"), "dry-run-id")
+        finally:
+            sp.DRY_RUN = saved_dry
+
+
+class TestBackupAndPrune(unittest.TestCase):
+    def test_backup_skip_flag(self):
+        saved_skip = sp.SKIP_BACKUP
+        try:
+            sp.SKIP_BACKUP = True
+            self.assertTrue(backup_to_drive(Path("dummy")))
+        finally:
+            sp.SKIP_BACKUP = saved_skip
+
+    def test_prune_local_chapters_live(self):
+        saved_prune = sp.PRUNE_ENABLED
+        saved_dry = sp.DRY_RUN
+        try:
+            sp.PRUNE_ENABLED = True
+            sp.DRY_RUN = False
+            with tempfile.TemporaryDirectory() as tmpdir:
+                comic_dir = Path(tmpdir) / "Comic"
+                ch_dir = comic_dir / "Chapter 1"
+                ch_dir.mkdir(parents=True)
+                (ch_dir / "001.jpg").write_bytes(b"test")
+
+                self.assertTrue(ch_dir.exists())
+                prune_local_chapters([{"dir": ch_dir}])
+                self.assertFalse(ch_dir.exists())
+        finally:
+            sp.PRUNE_ENABLED = saved_prune
+            sp.DRY_RUN = saved_dry
+
+
+class TestDiscordPayload(unittest.TestCase):
+    def test_payload_empty_summary(self):
+        payload = build_discord_payload([])
+        desc = payload["embeds"][0]["description"]
+        self.assertIn("No new chapters", desc)
+
+    def test_payload_groups_by_comic_with_author_and_category(self):
+        payload = build_discord_payload([
+            {"comic": "One Piece", "author": "Oda", "category": "Shounen", "chapter": "1120"},
+            {"comic": "One Piece", "author": "Oda", "category": "Shounen", "chapter": "1121"},
+            {"comic": "Jujutsu Kaisen", "author": "Gege", "category": "Action", "chapter": "268"},
+        ])
+        fields = {f["name"]: f["value"] for f in payload["embeds"][0]["fields"]}
+        self.assertTrue(any("One Piece" in k and "Oda" in k and "Shounen" in k for k in fields.keys()))
+        self.assertTrue(any("1120, 1121" in v for v in fields.values()))
+        self.assertEqual(len(fields), 2)
+
+    def test_payload_reports_count(self):
+        payload = build_discord_payload([{"comic": "A", "author": "Unknown", "chapter": "Ch 1"}])
+        self.assertIn("1 new chapter(s)", payload["embeds"][0]["description"])
+
+
+if __name__ == '__main__':
+    unittest.main()

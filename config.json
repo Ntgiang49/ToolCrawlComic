@@ -13,10 +13,16 @@
       },
       "selectors": {
         "comic_title": "h1.title-detail, h1",
+        "author": "li.author",
+        "author_prefix": "Tác giả",
+        "category": "li.kind a, li.kind p",
+        "category_prefix": "Thể loại",
+        "description": "div.detail-content p, .detail-content",
         "chapter_list": "div.list-chapter a, ul.list-chapter a, .chapter a, a[href*='/chuong-']",
         "chapter_title": "text",
         "page_images": "div.page-chapter img, div.reading-detail img, .reading img",
-        "image_url_attributes": ["data-original", "data-src", "src"]
+        "image_url_attributes": ["data-original", "data-src", "src"],
+        "filter_same_comic": true
       }
     },
     {
@@ -27,6 +33,9 @@
       },
       "selectors": {
         "comic_title": "div.story-info-right h1, h1.title-manga",
+        "author": "td.table-value a[href*='author'], .variations-tableInfo tr:nth-child(2) .table-value",
+        "category": "td.table-value a[href*='genre'], .genres-content a",
+        "description": "div#panel-story-info-description, .story-info-right-extent",
         "chapter_list": "ul.row-content-chapter li a, a.chapter-name",
         "chapter_title": "text",
         "page_images": "div.container-chapter-reader img",
@@ -41,6 +50,11 @@
       },
       "selectors": {
         "comic_title": "ul.manga-info-text h1, h1",
+        "author": "ul.manga-info-text li:nth-of-type(2)",
+        "author_prefix": "Author(s) :",
+        "category": "ul.manga-info-text li:nth-of-type(7) a, ul.manga-info-text li:nth-of-type(7)",
+        "category_prefix": "Genres :",
+        "description": "div#noidungm",
         "chapter_list": "div.chapter-list div.row a",
         "chapter_title": "text",
         "page_images": "div.vng-true img, div.container-chapter-reader img",
@@ -55,6 +69,9 @@
       },
       "selectors": {
         "comic_title": "h1.text-xl, h1.font-bold, h1",
+        "author": "span.font-medium:contains('Author') + span, .author",
+        "category": "div.flex.flex-wrap.gap-1 a, .genres a",
+        "description": "span.font-medium.text-sm, .text-sm.text-muted-foreground",
         "chapter_list": "a[href*='/chapter/']",
         "chapter_title": "text",
         "page_images": "img[src*='chapter'], img.object-cover",
@@ -69,6 +86,9 @@
       },
       "selectors": {
         "comic_title": "h1.text-xl, h1",
+        "author": ".author",
+        "category": "div.genres a, a[href*='/genre/']",
+        "description": "div.description, .summary",
         "chapter_list": "a[href*='/chapter/'], a[href*='/chapters/']",
         "chapter_title": "text",
         "page_images": "div.reading-content img, img[alt*='page']",
@@ -83,6 +103,9 @@
       },
       "selectors": {
         "comic_title": "h1.entry-title, h1",
+        "author": "div.tsinfo .imptdt:contains('Author') i, div.fmed:contains('Author') span",
+        "category": "div.seriestugenre a, div.gnr a",
+        "description": "div.entry-content, div.entry-content-single",
         "chapter_list": "div.eplister a, ul.clist a",
         "chapter_title": "text",
         "page_images": "div#readerarea img",
@@ -97,6 +120,9 @@
       },
       "selectors": {
         "comic_title": "h1",
+        "author": ".author",
+        "category": "a[href*='/genre/']",
+        "description": "div.description, p.text-sm",
         "chapter_list": "a[href*='/chapter/']",
         "chapter_title": "text",
         "page_images": "img.read-img, img[alt*='page']",
@@ -109,6 +135,9 @@
       "headers": {},
       "selectors": {
         "comic_title": "div.post-title h1, h1.entry-title",
+        "author": "div.author-content a, .author-content",
+        "category": "div.genres-content a, .genres-content",
+        "description": "div.description-summary, div.summary__content",
         "chapter_list": "li.wp-manga-chapter a",
         "chapter_title": "text",
         "page_images": "div.reading-content img, div.page-break img",

@@ -61,6 +61,9 @@ class ConfigLoader:
     def _get_fallback_selectors(self) -> Dict[str, Any]:
         return {
             "comic_title": "h1.entry-title, h1.title, h1, .manga-title",
+            "author": ".author, .author-name, span:contains('Author') + span",
+            "category": ".genres a, .genre a, a[href*='genre'], a[href*='the-loai']",
+            "description": ".description, .summary, .story-description, #noidungm",
             "chapter_list": "a[href*='chapter'], a[href*='ch-'], .chapter-list a, ul.clist a",
             "chapter_title": "text",
             "page_images": "div.reading-content img, div.page-break img, div.chapter-video img, #chapter-images img, article img, .manga-read img",
