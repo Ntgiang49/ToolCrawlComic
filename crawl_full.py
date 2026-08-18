@@ -58,6 +58,16 @@ def main() -> None:
         if idx + 1 < len(sys.argv):
             target_comic = sys.argv[idx + 1].strip().lower()
 
+    export_format = "images"
+    if "-f" in sys.argv:
+        idx = sys.argv.index("-f")
+        if idx + 1 < len(sys.argv):
+            export_format = sys.argv[idx + 1].strip().lower()
+    elif "--format" in sys.argv:
+        idx = sys.argv.index("--format")
+        if idx + 1 < len(sys.argv):
+            export_format = sys.argv[idx + 1].strip().lower()
+
     lib_manager = LibraryManager()
     library = lib_manager.get_all_comics()
 
@@ -120,7 +130,7 @@ def main() -> None:
             existing = {
                 int(ChapterNamer.extract_number(d.name))
                 for d in out_dir.iterdir()
-                if d.is_dir() and ChapterNamer.extract_number(d.name) is not None
+                if ChapterNamer.extract_number(d.name) is not None
             }
             print(f"  Enumeration 1..{probe_to}...")
             valid = enumerate_valid(session, url, probe_to)
@@ -133,9 +143,9 @@ def main() -> None:
             new_count = 0
             for i, n in enumerate(missing, 1):
                 ch_name = ChapterNamer.format_chapter_name(f"Chapter {n}", total_chapters=max_n)
-                print(f"  [{i}/{len(missing)}] {ch_name}...", flush=True)
+                print(f"  [{i}/{len(missing)}] {ch_name} ({export_format.upper()})...", flush=True)
                 success, msg = crawler.download_chapter(
-                    ch_name, base + str(n), site_config, str(out_dir), "images"
+                    ch_name, base + str(n), site_config, str(out_dir), export_format
                 )
                 if success:
                     new_count += 1
