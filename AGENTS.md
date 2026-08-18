@@ -19,9 +19,13 @@
 ## Commands Reference
 
 ### Testing & Quality Gates
-- **Run Entire Test Suite:**
+- **Run Entire Test Suite (41 tests):**
   ```powershell
   python -m unittest discover -s . -p "test_*.py"
+  ```
+- **Pre-Flight Health Diagnostics:**
+  ```powershell
+  python sync_pipeline.py --health
   ```
 - **Run Single Focused Test:**
   ```powershell
@@ -33,6 +37,10 @@
 - **Crawl & Track a Comic:**
   ```powershell
   python main.py "https://nettruyen.gg/truyen-tranh/su-tro-lai-cua-quyen-vuong" -f images -o downloads
+  ```
+- **Deep Full-Series Probe (Chapter 1 -> Latest) as CBZ:**
+  ```powershell
+  python crawl_full.py "https://nettruyen.gg/truyen-tranh/crush-cua-toi-la-mot-dua-lang-lo" -f cbz
   ```
 - **1-Command Batch Update All Library Favorites:**
   ```powershell
@@ -49,6 +57,10 @@
 - **Cloud Sync Dry Run (Safe Test):**
   ```powershell
   python sync_pipeline.py --dry-run
+  ```
+- **Single Comic Cloud Sync:**
+  ```powershell
+  python sync_pipeline.py --comic "Comic Name" --skip-backup
   ```
 - **Live Cloud Sync, Drive Backup & Local Prune:**
   ```powershell
@@ -125,5 +137,5 @@ Tool_crawl_comic/
 ├── library.json                # Tracked favorite comics catalog
 ├── secrets.env.template        # Environment variable template
 ├── docs/                       # Architectural records (ADR-001 - ADR-005)
-└── test_*.py                   # 40-test automated unit test suite
+└── test_*.py                   # 41-test automated unit test suite
 ```

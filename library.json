@@ -6,7 +6,7 @@
       "format": "images",
       "threads": 8,
       "total_chapters": 41,
-      "last_synced": "2026-08-17 11:44:54"
+      "last_synced": "2026-08-18 13:52:44"
     },
     "https://nettruyen.gg/truyen-tranh/duong-chuyen-dac-biet-cua-tien-ve-thien-tai": {
       "url": "https://nettruyen.gg/truyen-tranh/duong-chuyen-dac-biet-cua-tien-ve-thien-tai",
@@ -14,7 +14,23 @@
       "format": "images",
       "threads": 8,
       "total_chapters": 42,
-      "last_synced": "2026-08-17 11:44:42"
+      "last_synced": "2026-08-18 13:54:17"
+    },
+    "https://nettruyen.gg/truyen-tranh/su-tro-lai-cua-quyen-vuong": {
+      "url": "https://nettruyen.gg/truyen-tranh/su-tro-lai-cua-quyen-vuong",
+      "title": "Sự Trở Lại Của Quyền Vương",
+      "format": "images",
+      "threads": 8,
+      "total_chapters": 20,
+      "last_synced": "2026-08-18 13:54:59"
+    },
+    "https://nettruyen.gg/truyen-tranh/crush-cua-toi-la-mot-dua-lang-lo": {
+      "url": "https://nettruyen.gg/truyen-tranh/crush-cua-toi-la-mot-dua-lang-lo",
+      "title": "Crush Của Tôi Là Một Đứa Lẳng Lơ",
+      "format": "images",
+      "threads": 8,
+      "total_chapters": 41,
+      "last_synced": "2026-08-18 16:34:51"
     }
   }
 }
