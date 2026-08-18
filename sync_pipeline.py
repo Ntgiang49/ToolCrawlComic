@@ -61,6 +61,13 @@ SKIP_BACKUP = "--skip-backup" in sys.argv
 PRUNE_ENABLED = "--prune" in sys.argv
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+MIME_MAP = {
+    ".webp": "image/webp",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+}
 
 
 def sb_enabled() -> bool:
@@ -522,10 +529,8 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
                     with pbar_lock:
                         pbar.update(bytes_transferred)
 
-                suffix = img.suffix.lower()
-                mime_type = "image/webp" if suffix == ".webp" else ("image/jpeg" if suffix in (".jpg", ".jpeg") else ("image/png" if suffix == ".png" else "application/octet-stream"))
                 extra_args = {
-                    "ContentType": mime_type,
+                    "ContentType": MIME_MAP.get(img.suffix.lower(), "application/octet-stream"),
                     "CacheControl": "public, max-age=31536000, immutable",
                     "ContentDisposition": "inline",
                 }
