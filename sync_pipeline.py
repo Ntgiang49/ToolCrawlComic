@@ -285,7 +285,7 @@ def get_or_create_crawler_source(url: str) -> str | None:
             "crawler_sources",
             {
                 "name": domain,
-                "source_type": "comic",
+                "source_type": "html",
                 "source_url": f"https://{domain}",
                 "enabled": True,
                 "last_crawled_at": datetime.now(timezone.utc).isoformat(),
@@ -517,15 +517,24 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
             def _upload(img: Path) -> None:
                 key = f"{r2_prefix}/{img.name}"
                 thread_client = _get_r2_client()
-                
+
                 def _safe_update(bytes_transferred: int) -> None:
                     with pbar_lock:
                         pbar.update(bytes_transferred)
+
+                suffix = img.suffix.lower()
+                mime_type = "image/webp" if suffix == ".webp" else ("image/jpeg" if suffix in (".jpg", ".jpeg") else ("image/png" if suffix == ".png" else "application/octet-stream"))
+                extra_args = {
+                    "ContentType": mime_type,
+                    "CacheControl": "public, max-age=31536000, immutable",
+                    "ContentDisposition": "inline",
+                }
 
                 thread_client.upload_file(
                     str(img),
                     R2_BUCKET,
                     key,
+                    ExtraArgs=extra_args,
                     Callback=_safe_update,
                 )
 
@@ -564,7 +573,7 @@ def backup_to_drive(downloads_dir: Path) -> bool:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=600,
+            timeout=3600,
         )
         if proc.returncode != 0:
             print(f"  [ERROR] rclone backup failed (code {proc.returncode}): {proc.stderr}", file=sys.stderr)
