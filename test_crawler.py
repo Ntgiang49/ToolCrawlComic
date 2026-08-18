@@ -1,6 +1,7 @@
 import unittest
 import os
 import tempfile
+from unittest.mock import patch, MagicMock
 from PIL import Image
 
 from comic_crawler.utils import sanitize_filename, make_absolute_url, extract_domain
@@ -19,6 +20,66 @@ class TestComicCrawler(unittest.TestCase):
         site_cfg = loader.get_site_config("https://asuracomic.net/series/test-123")
         self.assertIn("headers", site_cfg)
         self.assertIn("selectors", site_cfg)
+        self.assertIn("author", site_cfg["selectors"])
+        self.assertIn("category", site_cfg["selectors"])
+        self.assertIn("description", site_cfg["selectors"])
+
+    def test_config_loader_fallbacks(self):
+        loader = ConfigLoader()
+        fallback_cfg = loader.get_site_config("https://unlisted-site.com/comic/123")
+        self.assertIn("author", fallback_cfg["selectors"])
+        self.assertIn("category", fallback_cfg["selectors"])
+        self.assertIn("description", fallback_cfg["selectors"])
+
+    def test_parse_comic_info_mocked(self):
+        crawler = ComicCrawler()
+        sample_html = """
+        <html>
+            <head><title>Test Comic</title></head>
+            <body>
+                <h1 class="title-detail">My Awesome Comic</h1>
+                <li class="author">Tác giả: Oda Sensei</li>
+                <li class="kind"><a>Action</a><a>Adventure</a></li>
+                <div class="detail-content"><p>An epic adventure in a fantasy world.</p></div>
+                <div class="list-chapter">
+                    <a href="/truyen-tranh/test/chuong-2">Chapter 2</a>
+                    <a href="/truyen-tranh/test/chuong-1">Chapter 1</a>
+                </div>
+            </body>
+        </html>
+        """
+        with patch.object(crawler, "_fetch_html", return_value=sample_html):
+            info = crawler.parse_comic_info("https://nettruyen.gg/truyen-tranh/test")
+            self.assertEqual(info["title"], "My Awesome Comic")
+            self.assertEqual(info["author"], "Oda Sensei")
+            self.assertIn("Action", info["category"])
+            self.assertIn("Adventure", info["category"])
+            self.assertEqual(info["description"], "An epic adventure in a fantasy world.")
+            self.assertEqual(len(info["chapters"]), 2)
+            self.assertEqual(info["chapters"][0]["title"], "Chapter 001")
+            self.assertEqual(info["chapters"][1]["title"], "Chapter 002")
+
+    def test_extract_chapter_images_mocked(self):
+        crawler = ComicCrawler()
+        sample_chapter_html = """
+        <html>
+            <body>
+                <div class="reading-detail">
+                    <img data-original="https://cdn.site.com/001.jpg" />
+                    <img data-src="https://cdn.site.com/002.jpg" />
+                    <img src="https://cdn.site.com/003.jpg" />
+                </div>
+            </body>
+        </html>
+        """
+        loader = ConfigLoader()
+        site_cfg = loader.get_site_config("https://nettruyen.gg/truyen/test")
+        with patch.object(crawler, "_fetch_html", return_value=sample_chapter_html):
+            images = crawler.extract_chapter_images("https://nettruyen.gg/truyen/test/chuong-1", site_cfg)
+            self.assertEqual(len(images), 3)
+            self.assertIn("https://cdn.site.com/001.jpg", images)
+            self.assertIn("https://cdn.site.com/002.jpg", images)
+            self.assertIn("https://cdn.site.com/003.jpg", images)
 
     def test_exporter_cbz_and_pdf(self):
         with tempfile.TemporaryDirectory() as tmpdir:
