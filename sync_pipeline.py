@@ -685,10 +685,77 @@ def send_discord(summary: list[dict], duration_seconds: float = 0.0) -> None:
         print(f"Discord webhook failed: {resp.status_code} {resp.text}", file=sys.stderr)
 
 
+# ── Diagnostics ──────────────────────────────────────────────────────
+
+
+def run_health_check() -> bool:
+    """Diagnostic check verifying R2, Supabase, Google Drive, and Discord connectivity."""
+    print("=" * 55)
+    print(" ToolCrawlComic - Pipeline Health & Diagnostic Check")
+    print("=" * 55)
+    all_ok = True
+
+    # 1. Cloudflare R2
+    try:
+        client = _get_r2_client()
+        client.head_bucket(Bucket=R2_BUCKET)
+        print(f" [OK] Cloudflare R2: Connected (Bucket: '{R2_BUCKET}')")
+    except Exception as e:
+        print(f" [FAIL] Cloudflare R2: Connection error: {e}")
+        all_ok = False
+
+    # 2. Supabase PostgreSQL
+    if sb_enabled():
+        try:
+            res = supabase_get("crawler_sources", {"select": "id", "limit": "1"})
+            print(f" [OK] Supabase DB: Connected ({SUPABASE_URL})")
+        except Exception as e:
+            print(f" [FAIL] Supabase DB: Query error: {e}")
+            all_ok = False
+    else:
+        print(" [WARN] Supabase DB: Credentials missing in env (SUPABASE_URL / SUPABASE_SERVICE_KEY)")
+
+    # 3. Google Drive / rclone
+    if shutil.which("rclone"):
+        print(f" [OK] Google Drive (rclone): Executable found (Remote: '{RCLONE_REMOTE}')")
+    else:
+        print(" [WARN] Google Drive (rclone): 'rclone' executable not found in PATH")
+
+    # 4. Discord Webhook
+    if DISCORD_WEBHOOK and DISCORD_WEBHOOK.startswith("https://discord.com/api/webhooks/"):
+        print(" [OK] Discord Webhook: Configured")
+    else:
+        print(" [WARN] Discord Webhook: DISCORD_WEBHOOK_URL not configured")
+
+    # 5. Local Downloads Directory
+    downloads_path = Path(DOWNLOADS_DIR)
+    try:
+        downloads_path.mkdir(parents=True, exist_ok=True)
+        test_file = downloads_path / ".health_test"
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink()
+        print(f" [OK] Downloads Directory: Ready & writable ('{downloads_path.resolve()}')")
+    except Exception as e:
+        print(f" [FAIL] Downloads Directory: Not writable: {e}")
+        all_ok = False
+
+    print("=" * 55)
+    if all_ok:
+        print(" Status: ALL CRITICAL SYSTEMS OPERATIONAL (Healthy)")
+    else:
+        print(" Status: ISSUES DETECTED - Please verify credentials above")
+    print("=" * 55)
+    return all_ok
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 
 def main() -> None:
+    if "--health" in sys.argv or "--check" in sys.argv:
+        healthy = run_health_check()
+        sys.exit(0 if healthy else 1)
+
     started_at = datetime.now(timezone.utc)
     downloads = Path(DOWNLOADS_DIR)
     if not downloads.exists():

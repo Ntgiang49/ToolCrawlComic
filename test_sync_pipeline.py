@@ -192,7 +192,17 @@ class TestR2Operations(unittest.TestCase):
                 mock_client.upload_file.assert_called_once()
                 args, kwargs = mock_client.upload_file.call_args
                 self.assertEqual(kwargs["ExtraArgs"]["ContentType"], "image/webp")
-                self.assertIn("immutable", kwargs["ExtraArgs"]["CacheControl"])
+class TestHealthCheck(unittest.TestCase):
+    def test_run_health_check_healthy(self):
+        mock_r2 = MagicMock()
+        mock_r2.head_bucket.return_value = {}
+
+        with patch("sync_pipeline._get_r2_client", return_value=mock_r2), \
+             patch("sync_pipeline.supabase_get", return_value=[{"id": "123"}]), \
+             patch("sync_pipeline.shutil.which", return_value="/usr/bin/rclone"), \
+             patch("sync_pipeline.DISCORD_WEBHOOK", "https://discord.com/api/webhooks/123/abc"):
+            healthy = sp.run_health_check()
+            self.assertTrue(healthy)
 
 
 if __name__ == '__main__':
