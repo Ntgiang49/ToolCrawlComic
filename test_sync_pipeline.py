@@ -176,6 +176,34 @@ class TestR2Operations(unittest.TestCase):
         self.assertIn("chapters/comic/ch_1/003.jpg", keys)
         self.assertEqual(mock_client.list_objects_v2.call_count, 2)
 
+    def test_upload_to_r2_with_webp_headers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ch_dir = Path(tmpdir) / "Chapter 1"
+            ch_dir.mkdir()
+            img_file = ch_dir / "001.webp"
+            img_file.write_bytes(b"mock-webp-bytes")
+
+            mock_client = MagicMock()
+            mock_client.list_objects_v2.return_value = {"Contents": []}
+
+            with patch("sync_pipeline._get_r2_client", return_value=mock_client):
+                success = sp.upload_to_r2(ch_dir, "chapters/test/ch_1")
+                self.assertTrue(success)
+                mock_client.upload_file.assert_called_once()
+                args, kwargs = mock_client.upload_file.call_args
+                self.assertEqual(kwargs["ExtraArgs"]["ContentType"], "image/webp")
+class TestHealthCheck(unittest.TestCase):
+    def test_run_health_check_healthy(self):
+        mock_r2 = MagicMock()
+        mock_r2.head_bucket.return_value = {}
+
+        with patch("sync_pipeline._get_r2_client", return_value=mock_r2), \
+             patch("sync_pipeline.supabase_get", return_value=[{"id": "123"}]), \
+             patch("sync_pipeline.shutil.which", return_value="/usr/bin/rclone"), \
+             patch("sync_pipeline.DISCORD_WEBHOOK", "https://discord.com/api/webhooks/123/abc"):
+            healthy = sp.run_health_check()
+            self.assertTrue(healthy)
+
 
 if __name__ == '__main__':
     unittest.main()

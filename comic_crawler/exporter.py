@@ -59,6 +59,14 @@ class ComicExporter:
         cls.export_to_cbz(images, out_path)
         return out_path
 
+    @staticmethod
+    def _collect_images(dir_path: str, valid_exts: set) -> List[str]:
+        """Collect and sort image file paths in directory matching valid extensions."""
+        return sorted([
+            os.path.join(dir_path, f) for f in os.listdir(dir_path)
+            if os.path.splitext(f)[1].lower() in valid_exts
+        ])
+
     @classmethod
     def convert_directory(cls, input_dir: str, target_format: str = "cbz") -> List[str]:
         """
@@ -70,25 +78,18 @@ class ComicExporter:
         converted_files = []
         valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
-        # Case 1: Subdirectories represent chapters
         subdirs = [os.path.join(input_dir, d) for d in os.listdir(input_dir) if os.path.isdir(os.path.join(input_dir, d)) and not d.startswith("_")]
 
         if subdirs:
+            # Case 1: Subdirectories represent chapters
             for ch_dir in subdirs:
-                ch_name = os.path.basename(ch_dir)
-                images = sorted([
-                    os.path.join(ch_dir, f) for f in os.listdir(ch_dir)
-                    if os.path.splitext(f)[1].lower() in valid_exts
-                ])
+                images = cls._collect_images(ch_dir, valid_exts)
                 if images:
-                    out_path = cls._export_to_target(images, os.path.join(input_dir, ch_name), target_format)
+                    out_path = cls._export_to_target(images, os.path.join(input_dir, os.path.basename(ch_dir)), target_format)
                     converted_files.append(out_path)
         else:
             # Case 2: Direct folder of images
-            images = sorted([
-                os.path.join(input_dir, f) for f in os.listdir(input_dir)
-                if os.path.splitext(f)[1].lower() in valid_exts
-            ])
+            images = cls._collect_images(input_dir, valid_exts)
             if images:
                 ch_name = os.path.basename(os.path.normpath(input_dir))
                 out_path = cls._export_to_target(images, os.path.join(os.path.dirname(input_dir), ch_name), target_format)

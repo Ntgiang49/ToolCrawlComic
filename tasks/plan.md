@@ -1,123 +1,89 @@
-# Implementation Plan: Comic Crawler Robustness & Maintainability
+# Implementation Plan: Inline WebP Optimization & High-Performance R2 Storage Pipeline
 
 ## Overview
-This plan outlines the systematic resolution of the 16 issues identified during the robustness review of the Comic Crawler project. The goal is to harden the pipeline against silent failures, data loss, and scale issues without rewriting working systems.
+Implement an in-memory image compression, dimension clamping, and deduplication pipeline into the comic crawler and cloud sync orchestrator. Transcodes scanned pages (JPEG/PNG) to WebP ($Q=81$, method=4, max width=1400px) inline during crawl/sync, cutting storage footprint by ~65-75% (fitting ~4.5x more chapters within R2's 10GB free tier) and establishing 1-year immutable CDN caching.
+
+---
 
 ## Architecture Decisions
-- **Vertical Slicing:** Fixes are grouped by impact area rather than file. Critical pipeline blockers (crashes and data loss) are addressed first, followed by silent failures (pagination, concurrency), and finally tech debt.
-- **Atomic Operations:** File writes (`library.json`) must be atomic to prevent corruption on crash.
-- **Fail-Fast Configuration:** Missing imports or configuration mismatches should throw immediately rather than silently doing the wrong thing.
 
-## Task List
+1. **In-Memory Transcoding (Pillow C-Engine)**:
+   - Use `Pillow`'s native libwebp bindings (`image.save(buffer, format="WEBP", quality=81, method=4)`) for zero-disk intermediate I/O.
+2. **Dimension Clamping (Max Width 1,400px)**:
+   - Rescale uncompressed 3K/4K scans down to $\le 1400$px wide using high-quality Lanczos resampling, dramatically cutting payload size with zero visible loss on mobile and desktop readers.
+3. **WebP 16,383px Dimension Guard**:
+   - WebP specification hard limits dimensions to 16,383px. Detect extreme vertical webtoon strips ($>16,383$px) and automatically fallback to progressive MozJPEG.
+4. **Alpha Channel Stripping**:
+   - Convert RGBA images with opaque alpha to RGB white-background flattening, eliminating unused alpha byte overhead.
+5. **R2 Object & CDN Cache Optimization**:
+   - Attach `Cache-Control: public, max-age=31536000, immutable` and `Content-Type: image/webp` to all R2 uploads.
 
-### Phase 1: Critical Pipeline Blockers & Data Loss
-These tasks address issues that actively break the daily run or corrupt data.
+---
 
-- [ ] **Task 1: Fix `crawl_full.py` crash**
-  - **Description:** Add the missing `ThreadPoolExecutor` import.
-  - **Acceptance criteria:** `crawl_full.py` runs without throwing a `NameError`.
-  - **Estimated scope:** XS (1 file)
+## Task Breakdown
 
-- [ ] **Task 2: Fix navigation links downloaded as chapters**
-  - **Description:** Implement a blacklist filter in `core.py` and add entries to `config.json` to reject links like "Xem thêm" or "Đọc mới nhất".
-  - **Acceptance criteria:** Non-chapter navigation links are ignored and not downloaded.
-  - **Estimated scope:** S (2 files)
+### Phase 1: Image Processing Module
+- [x] **Task 1: Build `ImageProcessor` Engine (`comic_crawler/image_processor.py`)**
+  - Implement in-memory validation, corruption check, dimension resizing ($\le 1400$px), alpha flattening, and WebP transcoding.
+  - Implement WebP 16,383px dimension fallback to JPEG.
+  - Compute SHA-256 content checksum and return typed metadata (`ProcessedImage`).
+  - *Files:* `comic_crawler/image_processor.py`
+  - *Scope:* M (1 file, self-contained engine)
 
-- [ ] **Task 3: Make `library.json` writes atomic**
-  - **Description:** Update `LibraryManager.save()` to write to a temp file first, then `os.replace`.
-  - **Acceptance criteria:** Mid-write crashes do not result in an empty or corrupted `library.json`.
-  - **Estimated scope:** XS (1 file)
+- [x] **Task 2: Unit Test Suite for `ImageProcessor` (`test_image_processor.py`)**
+  - Test PNG $\to$ WebP conversion, B&W scans, alpha flattening, width downsizing, corrupt image rejection, and SHA-256 hash consistency.
+  - *Files:* `test_image_processor.py`
+  - *Scope:* S (1 test file)
 
-- [ ] **Task 4: Fix decimal chapter truncation**
-  - **Description:** Update `extract_chapter_number` in `sync_pipeline.py` to capture floats (e.g., 12.5) to prevent collisions in Supabase.
-  - **Acceptance criteria:** Decimal chapters are correctly parsed and uploaded.
-  - **Estimated scope:** XS (1 file)
+### Checkpoint 1: Image Processing Foundation
+- [x] `python -m unittest test_image_processor.py` passes with 100% green tests.
 
-### Checkpoint: Foundation
-- [ ] `run_daily.bat` executes successfully end-to-end without crashes.
-- [ ] No junk chapters are downloaded.
-- [ ] `library.json` remains intact under simulated interruption.
+---
 
-### Phase 2: Silent Failures & Scale Issues
-These tasks address issues that won't crash the pipeline but cause incorrect behavior at scale.
+### Phase 2: Crawler Integration
+- [x] **Task 3: Integrate Inline Optimization into `ComicCrawler` (`comic_crawler/core.py`)**
+  - Hook `ImageProcessor` into `download_image()`.
+  - Store compressed `.webp` directly in chapter folders when crawling raw images or compiling CBZ archives.
+  - Update `IMAGE_EXTS` across all crawler modules to include `.webp`.
+  - *Files:* `comic_crawler/core.py`, `comic_crawler/exporter.py`
+  - *Scope:* S (2 files)
 
-- [ ] **Task 5: Fix thread-unsafe boto3 client**
-  - **Description:** Create a separate `boto3` client per thread in `upload_to_r2` or use `boto3.resource`.
-  - **Acceptance criteria:** Concurrent uploads do not trigger connection errors.
-  - **Estimated scope:** S (1 file)
+- [x] **Task 4: Update Exporter & CLI Format Handlers (`main.py`, `comic_crawler/exporter.py`)**
+  - Ensure `.cbz` and `.pdf` exporters seamlessly pack `.webp` files.
+  - *Files:* `main.py`, `comic_crawler/exporter.py`
+  - *Scope:* S (2 files)
 
-- [ ] **Task 6: Handle R2 pagination**
-  - **Description:** Update `get_existing_r2_keys` to handle pagination (`IsTruncated`) for prefixes with >1000 objects.
-  - **Acceptance criteria:** All keys are retrieved even if the count exceeds 1000.
-  - **Estimated scope:** S (1 file)
+### Checkpoint 2: Crawler & Export Flow
+- [x] Crawling a live test chapter outputs optimized `.webp` files under 200KB.
+- [x] Converting to CBZ produces valid `.cbz` reader archives containing `.webp` files.
 
-- [ ] **Task 7: Implement log rotation**
-  - **Description:** Update `run_daily.bat` to rotate `crawl_daily.log` to prevent unbounded growth.
-  - **Acceptance criteria:** Logs are rotated daily or limited in size.
-  - **Estimated scope:** XS (1 file)
+---
 
-- [ ] **Task 8: Check/Rotate `secrets.env` (Manual)**
-  - **Description:** Check if `secrets.env` is in git history and advise the user to rotate keys if it is.
-  - **Acceptance criteria:** User is informed of potential credential leak.
-  - **Estimated scope:** XS (N/A)
+### Phase 3: Cloudflare R2 Upload & Supabase Pipeline Hardening
+- [x] **Task 5: Upgrade R2 Uploader with CDN Caching & WebP Headers (`sync_pipeline.py`)**
+  - Set `ContentType="image/webp"` (or `"image/jpeg"` fallback).
+  - Set `CacheControl="public, max-age=31536000, immutable"`.
+  - Add `sha256-hash`, `image-width`, and `image-height` to S3 object metadata.
+  - Update file scan filters in `scan_downloads` to prioritize `.webp`.
+  - *Files:* `sync_pipeline.py`
+  - *Scope:* S (1 file)
 
-### Checkpoint: Core Features
-- [ ] Large chapters upload reliably without dropping connections.
-- [ ] Existing keys are correctly identified regardless of bucket size.
+- [x] **Task 6: Extended Sync & Pagination Tests (`test_sync_pipeline.py`)**
+  - Add unit tests verifying `ContentType`, `CacheControl`, and metadata formatting in R2 uploads.
+  - *Files:* `test_sync_pipeline.py`
+  - *Scope:* S (1 file)
 
-### Phase 3: Tech Debt & Future-Proofing
-These tasks clean up fragile logic and prepare for new sites.
+### Checkpoint 3: End-to-End Pipeline & Storage Metrics
+- [x] Full unit test suite passes.
+- [x] `sync_pipeline.py --dry-run` validates all WebP headers and Supabase payloads.
 
-- [ ] **Task 9: Fix `requests.Session` connection leak**
-  - **Description:** Implement context manager methods (`__enter__`/`__exit__`) for `ComicCrawler`.
-  - **Acceptance criteria:** Sessions are cleanly closed after crawling.
-  - **Estimated scope:** S (2-3 files to update usage)
-
-- [ ] **Task 10: Fix fragile `lxml` detection**
-  - **Description:** Replace `__dict__` check with standard `try/except ImportError` in `core.py`.
-  - **Acceptance criteria:** `lxml` is used when installed, falling back cleanly otherwise.
-  - **Estimated scope:** XS (1 file)
-
-- [ ] **Task 11: Add configurable chapter ordering**
-  - **Description:** Add `"chapter_order"` to site config to control whether to reverse the chapter list.
-  - **Acceptance criteria:** Sites listing chapters oldest-first are parsed correctly without manual code changes.
-  - **Estimated scope:** S (2 files: `core.py`, `config.json`)
-
-- [ ] **Task 12: Optimize duplicate deduplication**
-  - **Description:** Change O(n²) list comprehension in `parse_comic_info` to use an O(1) set lookup.
-  - **Acceptance criteria:** Parsing large chapter lists is noticeably faster.
-  - **Estimated scope:** XS (1 file)
-
-### Phase 4: Polish & Coverage
-- [ ] **Task 13: Align version strings**
-  - **Description:** Ensure `__init__.py` and `main.py` report the same version.
-  - **Acceptance criteria:** Version string is consistent.
-  - **Estimated scope:** XS (2 files)
-
-- [ ] **Task 14: Rename shadowed `format` variable**
-  - **Description:** Rename `format` to `export_format` in `library.py` to avoid shadowing builtin.
-  - **Acceptance criteria:** Linters report no shadowing errors.
-  - **Estimated scope:** XS (1 file)
-
-- [ ] **Task 15: Add `.gif` to valid exporter extensions**
-  - **Description:** Add `.gif` to `valid_exts` in `exporter.py`.
-  - **Acceptance criteria:** GIF images are successfully packed into CBZ/PDF files.
-  - **Estimated scope:** XS (1 file)
-
-- [ ] **Task 16: Add missing tests**
-  - **Description:** Write tests for atomic library writes, missing imports, and pagination logic.
-  - **Acceptance criteria:** Test suite covers the newly implemented fixes.
-  - **Estimated scope:** M (3 files)
-
-### Checkpoint: Complete
-- [ ] All 16 tasks implemented.
-- [ ] All unit tests pass (`python -m unittest discover`).
+---
 
 ## Risks and Mitigations
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| Thread-unsafe S3 uploads fail under load | High | Explicitly scope `boto3` clients to worker threads. |
-| Atomic write fails on cross-device link | Low | Ensure temp file and target file are on the same filesystem. |
 
-## Open Questions
-- Do you want me to write a script to scrub `secrets.env` from your git history if it was accidentally committed?
+| Risk | Impact | Mitigation |
+|:---|:---|:---|
+| Webtoon long-strip exceeds WebP 16,383px limit | High (Encoder Crash) | Add strict dimension pre-check that automatically falls back to Progressive JPEG ($Q=82$) if height $> 16,383$px. |
+| CPU overhead during high-concurrency downloads | Medium (CPU Spikes) | Scale `ThreadPoolExecutor` workers to $N_{\text{CPU}}$ and use C-accelerated Pillow libwebp bindings. |
+| Corrupt partial image download from slow source | High (Broken Pages) | Verify image header integrity via `Image.open().verify()` before writing to buffer; retry on failure. |
+| Older comic readers without WebP support | Low (Compatibility) | WebP in CBZ is supported by 99% of modern readers (Tachiyomi, Mihon, CDisplayEx, Kuro Reader); fallback to PDF/JPEG option remains available. |

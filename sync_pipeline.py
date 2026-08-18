@@ -23,7 +23,24 @@ import boto3
 import requests
 from tqdm import tqdm
 
-# --- Config from env ---
+# --- Config from env & secrets.env fallback ---
+def _load_env_file(path: str = "secrets.env") -> None:
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip().strip("\"'")
+                        if k and not os.environ.get(k):
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+_load_env_file("secrets.env")
+_load_env_file(".env")
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 R2_BUCKET = os.environ.get("R2_BUCKET_NAME", "comic")
@@ -44,6 +61,13 @@ SKIP_BACKUP = "--skip-backup" in sys.argv
 PRUNE_ENABLED = "--prune" in sys.argv
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+MIME_MAP = {
+    ".webp": "image/webp",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+}
 
 
 def sb_enabled() -> bool:
@@ -268,7 +292,7 @@ def get_or_create_crawler_source(url: str) -> str | None:
             "crawler_sources",
             {
                 "name": domain,
-                "source_type": "comic",
+                "source_type": "html",
                 "source_url": f"https://{domain}",
                 "enabled": True,
                 "last_crawled_at": datetime.now(timezone.utc).isoformat(),
@@ -288,25 +312,26 @@ def record_crawler_run(
     items_created: int,
     items_updated: int,
     log_text: str = "",
-    status: str = "completed",
+    status: str = "succeeded",
 ) -> None:
     """Record execution metrics in crawler_runs table."""
     if not sb_enabled() or DRY_RUN:
         return
     try:
-        supabase_post(
-            "crawler_runs",
-            {
-                "source_id": source_id,
-                "status": status,
-                "started_at": started_at.isoformat(),
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "items_seen": items_seen,
-                "items_created": items_created,
-                "items_updated": items_updated,
-                "log": log_text[:5000] if log_text else "Sync completed successfully",
-            },
-        )
+        # Map common aliases to match PostgreSQL check constraint ('queued', 'running', 'succeeded', 'failed')
+        db_status = "succeeded" if status in ("completed", "succeeded") else status
+        payload = {
+            "status": db_status,
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "items_seen": items_seen,
+            "items_created": items_created,
+            "items_updated": items_updated,
+            "log": log_text[:5000] if log_text else "Sync completed successfully",
+        }
+        if source_id:
+            payload["source_id"] = source_id
+        supabase_post("crawler_runs", payload)
     except Exception as e:
         print(f"  [Warning] Failed to record crawler run: {e}", file=sys.stderr)
 
@@ -499,15 +524,22 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
             def _upload(img: Path) -> None:
                 key = f"{r2_prefix}/{img.name}"
                 thread_client = _get_r2_client()
-                
+
                 def _safe_update(bytes_transferred: int) -> None:
                     with pbar_lock:
                         pbar.update(bytes_transferred)
+
+                extra_args = {
+                    "ContentType": MIME_MAP.get(img.suffix.lower(), "application/octet-stream"),
+                    "CacheControl": "public, max-age=31536000, immutable",
+                    "ContentDisposition": "inline",
+                }
 
                 thread_client.upload_file(
                     str(img),
                     R2_BUCKET,
                     key,
+                    ExtraArgs=extra_args,
                     Callback=_safe_update,
                 )
 
@@ -546,7 +578,7 @@ def backup_to_drive(downloads_dir: Path) -> bool:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=600,
+            timeout=3600,
         )
         if proc.returncode != 0:
             print(f"  [ERROR] rclone backup failed (code {proc.returncode}): {proc.stderr}", file=sys.stderr)
@@ -658,10 +690,77 @@ def send_discord(summary: list[dict], duration_seconds: float = 0.0) -> None:
         print(f"Discord webhook failed: {resp.status_code} {resp.text}", file=sys.stderr)
 
 
+# ── Diagnostics ──────────────────────────────────────────────────────
+
+
+def run_health_check() -> bool:
+    """Diagnostic check verifying R2, Supabase, Google Drive, and Discord connectivity."""
+    print("=" * 55)
+    print(" ToolCrawlComic - Pipeline Health & Diagnostic Check")
+    print("=" * 55)
+    all_ok = True
+
+    # 1. Cloudflare R2
+    try:
+        client = _get_r2_client()
+        client.head_bucket(Bucket=R2_BUCKET)
+        print(f" [OK] Cloudflare R2: Connected (Bucket: '{R2_BUCKET}')")
+    except Exception as e:
+        print(f" [FAIL] Cloudflare R2: Connection error: {e}")
+        all_ok = False
+
+    # 2. Supabase PostgreSQL
+    if sb_enabled():
+        try:
+            res = supabase_get("crawler_sources", {"select": "id", "limit": "1"})
+            print(f" [OK] Supabase DB: Connected ({SUPABASE_URL})")
+        except Exception as e:
+            print(f" [FAIL] Supabase DB: Query error: {e}")
+            all_ok = False
+    else:
+        print(" [WARN] Supabase DB: Credentials missing in env (SUPABASE_URL / SUPABASE_SERVICE_KEY)")
+
+    # 3. Google Drive / rclone
+    if shutil.which("rclone"):
+        print(f" [OK] Google Drive (rclone): Executable found (Remote: '{RCLONE_REMOTE}')")
+    else:
+        print(" [WARN] Google Drive (rclone): 'rclone' executable not found in PATH")
+
+    # 4. Discord Webhook
+    if DISCORD_WEBHOOK and DISCORD_WEBHOOK.startswith("https://discord.com/api/webhooks/"):
+        print(" [OK] Discord Webhook: Configured")
+    else:
+        print(" [WARN] Discord Webhook: DISCORD_WEBHOOK_URL not configured")
+
+    # 5. Local Downloads Directory
+    downloads_path = Path(DOWNLOADS_DIR)
+    try:
+        downloads_path.mkdir(parents=True, exist_ok=True)
+        test_file = downloads_path / ".health_test"
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink()
+        print(f" [OK] Downloads Directory: Ready & writable ('{downloads_path.resolve()}')")
+    except Exception as e:
+        print(f" [FAIL] Downloads Directory: Not writable: {e}")
+        all_ok = False
+
+    print("=" * 55)
+    if all_ok:
+        print(" Status: ALL CRITICAL SYSTEMS OPERATIONAL (Healthy)")
+    else:
+        print(" Status: ISSUES DETECTED - Please verify credentials above")
+    print("=" * 55)
+    return all_ok
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 
 def main() -> None:
+    if "--health" in sys.argv or "--check" in sys.argv:
+        healthy = run_health_check()
+        sys.exit(0 if healthy else 1)
+
     started_at = datetime.now(timezone.utc)
     downloads = Path(DOWNLOADS_DIR)
     if not downloads.exists():
@@ -675,6 +774,21 @@ def main() -> None:
     if not comics:
         print("No comics found in downloads/")
         sys.exit(0)
+
+    target_comic = None
+    if "--comic" in sys.argv:
+        idx = sys.argv.index("--comic")
+        if idx + 1 < len(sys.argv):
+            target_comic = sys.argv[idx + 1].strip().lower()
+
+    if target_comic:
+        comics = [
+            c for c in comics
+            if target_comic in c["title"].lower() or target_comic in c["slug"].lower()
+        ]
+        if not comics:
+            print(f"No matching comic found for '{target_comic}' in downloads/")
+            sys.exit(0)
 
     summary: list[dict] = []
     synced_for_prune: list[dict] = []

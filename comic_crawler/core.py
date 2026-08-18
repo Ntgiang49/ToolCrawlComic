@@ -13,6 +13,7 @@ from tqdm import tqdm
 from .config_loader import ConfigLoader
 from .exporter import ComicExporter
 from .chapter_namer import ChapterNamer
+from .image_processor import ImageProcessor
 from .utils import sanitize_filename, make_absolute_url
 
 
@@ -69,73 +70,76 @@ class ComicCrawler:
                 time.sleep(1.5 * (attempt + 1))
         return ""
 
-    def parse_comic_info(self, url: str) -> Dict[str, Any]:
-        """Parses main comic page to extract title, metadata, and chapters."""
-        site_config = self.config_loader.get_site_config(url)
-        headers = site_config["headers"]
+    def parse_comic_info(self, comic_url: str) -> Dict[str, Any]:
+        """Fetches and parses main comic landing page metadata and chapter list."""
+        site_config = self.config_loader.get_site_config(comic_url)
+        headers = site_config["headers"].copy()
+
+        html = self._fetch_html(comic_url, headers)
+        soup = BeautifulSoup(html, HTML_PARSER)
         selectors = site_config["selectors"]
 
-        html = self._fetch_html(url, headers)
-        soup = BeautifulSoup(html, HTML_PARSER)
+        # Parse Title
+        title = "Unknown Comic"
+        title_tag = soup.select_one(selectors.get("comic_title", selectors.get("title", "h1")))
+        if title_tag:
+            title = sanitize_filename(title_tag.get_text(strip=True))
 
-        # 1. Title
-        title_elem = soup.select_one(selectors.get("comic_title", "h1"))
-        comic_title = sanitize_filename(title_elem.get_text(strip=True)) if title_elem else "Unknown_Comic"
+        # Parse Author
+        author = "Unknown"
+        author_sel = selectors.get("author")
+        if author_sel:
+            tag = soup.select_one(author_sel)
+            if tag:
+                author = _clean_field(tag.get_text(strip=True), selectors.get("author_prefix", "Tác giả"))
 
-        # 2. Author
-        author_elem = soup.select_one(selectors.get("author", "")) if selectors.get("author") else None
-        author_raw = author_elem.get_text(strip=True) if author_elem else ""
-        author = _clean_field(author_raw, selectors.get("author_prefix", "")) or "Unknown"
-
-        # 3. Category / Genre
+        # Parse Category / Genre
         category = "Unknown"
-        if selectors.get("category"):
-            cat_nodes = soup.select(selectors["category"])
-            cats = [_clean_field(c.get_text(strip=True), selectors.get("category_prefix", "")) for c in cat_nodes]
-            cats = [c for c in cats if c]
-            if cats:
-                category = ", ".join(cats)
+        cat_sel = selectors.get("category")
+        if cat_sel:
+            tags = soup.select(cat_sel)
+            if tags:
+                cats = [_clean_field(t.get_text(strip=True), selectors.get("category_prefix", "Thể loại")) for t in tags]
+                category = ", ".join([c for c in cats if c and c != "Unknown"]) or "Unknown"
 
-        # 4. Description
+        # Parse Description
         description = ""
-        if selectors.get("description"):
-            desc_elem = soup.select_one(selectors["description"])
-            if desc_elem:
-                description = _clean_field(desc_elem.get_text(strip=True), selectors.get("description_prefix", ""))
+        desc_sel = selectors.get("description")
+        if desc_sel:
+            tag = soup.select_one(desc_sel)
+            if tag:
+                description = _clean_field(tag.get_text(strip=True), selectors.get("description_prefix", "Nội dung"))
 
-        # 5. Chapter Links
-        chapter_nodes = soup.select(selectors.get("chapter_list", "a[href*='chapter']"))
-        filter_same = selectors.get("filter_same_comic", False)
-        raw_blacklist = selectors.get("chapter_title_blacklist", [])
-        title_blacklist = {b.strip().lower() for b in raw_blacklist if b}
-        comic_path = urlparse(url).path.rstrip("/") + "/"
+        # Parse Chapters
         raw_chapters = []
         seen_urls = set()
+        ch_nodes = soup.select(selectors.get("chapter_list", ".chapter a"))
+        blacklist = [b.lower() for b in site_config.get("chapter_title_blacklist", [])]
+        comic_path = urlparse(comic_url).path.rstrip("/")
+        filter_same = selectors.get("filter_same_comic", True)
 
-        for idx, node in enumerate(chapter_nodes):
-            href = node.get("href")
-            if not href or href.strip() in ("#", "javascript:void(0)"):
+        for node in ch_nodes:
+            ch_url = node.get("href")
+            if not ch_url or ch_url.strip() in ("#", "javascript:void(0)"):
                 continue
-            abs_url = make_absolute_url(url, href)
-            if filter_same and not urlparse(abs_url).path.startswith(comic_path):
+
+            ch_title = node.get_text(strip=True)
+            if not ch_title or any(b in ch_title.lower() for b in blacklist):
                 continue
-            raw_title = node.get_text(strip=True) or f"Chapter_{idx + 1}"
-            if raw_title.lower() in title_blacklist:
+
+            abs_url = make_absolute_url(comic_url, ch_url)
+
+            # Filter out sidebar/widget chapters from other comics
+            if filter_same and comic_path and not urlparse(abs_url).path.startswith(comic_path):
                 continue
-            if not re.search(r"\d", raw_title):
-                m = re.search(r"(?:chuong|chapter)[-_/]?([0-9.]+)", href, re.IGNORECASE)
-                if m:
-                    raw_title = f"Chapter {m.group(1)}"
-                else:
-                    continue
 
             if abs_url not in seen_urls:
                 seen_urls.add(abs_url)
-                raw_chapters.append({"raw_title": raw_title, "url": abs_url})
+                raw_chapters.append({"raw_title": ch_title, "url": abs_url})
 
-        # Chronological order
-        chapter_order = site_config.get("chapter_order", "desc").lower()
-        if chapter_order == "desc" and raw_chapters:
+        # Apply configurable chapter order (default: desc in raw order)
+        order = site_config.get("chapter_order", "desc").lower()
+        if order == "desc" and raw_chapters:
             raw_chapters.reverse()
 
         total_count = len(raw_chapters)
@@ -148,19 +152,20 @@ class ComicCrawler:
         ]
 
         return {
-            "title": comic_title,
+            "title": title,
             "author": author,
             "category": category,
             "description": description,
             "chapters": chapters,
-            "site_config": site_config
+            "site_config": site_config,
         }
 
     def extract_chapter_images(self, chapter_url: str, site_config: Dict[str, Any]) -> List[str]:
-        """Extracts image URLs from a specific chapter page."""
-        html = self._fetch_html(chapter_url, site_config["headers"])
-        soup = BeautifulSoup(html, HTML_PARSER)
+        """Extracts list of raw image URLs from a chapter reader page."""
+        headers = site_config["headers"].copy()
+        html = self._fetch_html(chapter_url, headers)
 
+        soup = BeautifulSoup(html, HTML_PARSER)
         selectors = site_config["selectors"]
         img_nodes = soup.select(selectors.get("page_images", "img"))
         attrs = selectors.get("image_url_attributes", ["src", "data-src", "data-lazy-src", "data-original"])
@@ -187,15 +192,29 @@ class ComicCrawler:
             return True, target
         return False, target
 
-    def download_image(self, img_url: str, save_path: str, headers: Dict[str, str]) -> bool:
-        """Downloads a single image file with retries."""
+    def download_image(self, img_url: str, save_path: str, headers: Dict[str, str], optimize: bool = True) -> bool:
+        """Downloads a single image file with retries and inline WebP optimization."""
         for attempt in range(3):
             try:
-                res = self.session.get(img_url, headers=headers, timeout=15, stream=True)
+                res = self.session.get(img_url, headers=headers, timeout=15)
                 res.raise_for_status()
+                raw_bytes = res.content
+                if not raw_bytes:
+                    return False
+
+                if optimize:
+                    try:
+                        processed = ImageProcessor.process_image(raw_bytes)
+                        base, _ = os.path.splitext(save_path)
+                        final_save_path = f"{base}.{processed.format}"
+                        with open(final_save_path, "wb") as f:
+                            f.write(processed.buffer)
+                        return True
+                    except Exception:
+                        pass
+
                 with open(save_path, "wb") as f:
-                    for chunk in res.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                    f.write(raw_bytes)
                 return True
             except Exception:
                 if attempt == 2:
@@ -211,7 +230,7 @@ class ComicCrawler:
         output_dir: str,
         export_format: str = "images"
     ) -> Tuple[bool, str]:
-        """Downloads all images of a chapter concurrently and exports to format."""
+        """Downloads all images of a chapter concurrently with inline WebP optimization."""
         already_exists, _ = self.is_chapter_downloaded(chapter_title, output_dir, export_format)
         if already_exists:
             return True, f"[Skipped] {chapter_title} (Already exists)"
@@ -224,23 +243,22 @@ class ComicCrawler:
         temp_dir = os.path.join(output_dir, "_temp", ch_name)
         os.makedirs(temp_dir, exist_ok=True)
 
-        downloaded_paths = []
         headers = site_config["headers"].copy()
 
         with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
             tasks = []
             for idx, img_url in enumerate(image_urls):
-                ext = os.path.splitext(img_url.split("?")[0])[1]
-                if ext.lower() not in [".jpg", ".jpeg", ".png", ".webp", ".gif"]:
-                    ext = ".jpg"
-                save_path = os.path.join(temp_dir, f"{idx + 1:03d}{ext}")
-                downloaded_paths.append(save_path)
+                save_path = os.path.join(temp_dir, f"{idx + 1:03d}.webp")
                 tasks.append(executor.submit(self.download_image, img_url, save_path, headers))
 
             for _ in tqdm(as_completed(tasks), total=len(tasks), desc=f"Downloading {ch_name[:20]}", leave=False):
                 pass
 
-        valid_paths = [p for p in downloaded_paths if os.path.exists(p) and os.path.getsize(p) > 0]
+        valid_paths = [
+            os.path.join(temp_dir, f)
+            for f in sorted(os.listdir(temp_dir))
+            if os.path.isfile(os.path.join(temp_dir, f)) and os.path.getsize(os.path.join(temp_dir, f)) > 0
+        ]
         if not valid_paths:
             return False, f"Failed to download images for {chapter_title}"
 
