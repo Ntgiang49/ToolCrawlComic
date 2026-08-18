@@ -18,7 +18,7 @@
         "category": "li.kind a, li.kind p",
         "category_prefix": "Thể loại",
         "description": "div.detail-content p, .detail-content",
-        "chapter_list": "div.list-chapter a, ul.list-chapter a, .chapter a, a[href*='/chuong-']",
+        "chapter_list": "div.list-chapter a, ul.list-chapter a, #nt_listchapter a, .chapter a",
         "chapter_title": "text",
         "chapter_title_blacklist": ["Xem thêm", "Đọc mới nhất", "Đọc từ đầu"],
         "page_images": "div.page-chapter img, div.reading-detail img, .reading img",

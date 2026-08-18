@@ -115,6 +115,8 @@ class ComicCrawler:
         seen_urls = set()
         ch_nodes = soup.select(selectors.get("chapter_list", ".chapter a"))
         blacklist = [b.lower() for b in site_config.get("chapter_title_blacklist", [])]
+        comic_path = urlparse(comic_url).path.rstrip("/")
+        filter_same = selectors.get("filter_same_comic", True)
 
         for node in ch_nodes:
             ch_url = node.get("href")
@@ -126,6 +128,11 @@ class ComicCrawler:
                 continue
 
             abs_url = make_absolute_url(comic_url, ch_url)
+
+            # Filter out sidebar/widget chapters from other comics
+            if filter_same and comic_path and not urlparse(abs_url).path.startswith(comic_path):
+                continue
+
             if abs_url not in seen_urls:
                 seen_urls.add(abs_url)
                 raw_chapters.append({"raw_title": ch_title, "url": abs_url})
