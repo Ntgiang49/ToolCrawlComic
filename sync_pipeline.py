@@ -305,25 +305,26 @@ def record_crawler_run(
     items_created: int,
     items_updated: int,
     log_text: str = "",
-    status: str = "completed",
+    status: str = "succeeded",
 ) -> None:
     """Record execution metrics in crawler_runs table."""
     if not sb_enabled() or DRY_RUN:
         return
     try:
-        supabase_post(
-            "crawler_runs",
-            {
-                "source_id": source_id,
-                "status": status,
-                "started_at": started_at.isoformat(),
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "items_seen": items_seen,
-                "items_created": items_created,
-                "items_updated": items_updated,
-                "log": log_text[:5000] if log_text else "Sync completed successfully",
-            },
-        )
+        # Map common aliases to match PostgreSQL check constraint ('queued', 'running', 'succeeded', 'failed')
+        db_status = "succeeded" if status in ("completed", "succeeded") else status
+        payload = {
+            "status": db_status,
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "items_seen": items_seen,
+            "items_created": items_created,
+            "items_updated": items_updated,
+            "log": log_text[:5000] if log_text else "Sync completed successfully",
+        }
+        if source_id:
+            payload["source_id"] = source_id
+        supabase_post("crawler_runs", payload)
     except Exception as e:
         print(f"  [Warning] Failed to record crawler run: {e}", file=sys.stderr)
 
