@@ -11,6 +11,14 @@ for /f "usebackq eol=# tokens=1,* delims==" %%a in ("secrets.env") do set "%%a=%
 
 if not exist "%DOWNLOADS_DIR%" mkdir "%DOWNLOADS_DIR%"
 
+if exist crawl_daily.log (
+  for %%F in (crawl_daily.log) do (
+    if %%~zF GTR 5242880 (
+      move /y crawl_daily.log crawl_daily.log.old >nul 2>&1
+    )
+  )
+)
+
 python crawl_full.py >> crawl_daily.log 2>&1
 if errorlevel 1 goto crawl_failed
 

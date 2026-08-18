@@ -11,6 +11,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 if sys.stdout and hasattr(sys.stdout, 'buffer'):
@@ -62,12 +63,13 @@ def slugify(text: str) -> str:
     return text.strip("-")
 
 
-def extract_chapter_number(folder_name: str) -> int | None:
-    """Extract integer chapter number from folder name ('Chapter 001' → 1)."""
-    match = re.search(r"(\d+)", folder_name)
+def extract_chapter_number(folder_name: str) -> float | int | None:
+    """Extract chapter number (int or float) from folder name ('Chapter 001' → 1, 'Chapter 012.5' → 12.5)."""
+    match = re.search(r"(\d+(?:\.\d+)?)", folder_name)
     if match:
-        num = int(match.group(1))
-        return num if num > 0 else None
+        val = float(match.group(1))
+        if val > 0:
+            return int(val) if val.is_integer() else val
     return None
 
 
@@ -171,8 +173,11 @@ def supabase_patch(table: str, params: dict, data: dict) -> list:
     return resp.json()
 
 
+_LOOKUP_CACHE: dict[tuple[str, str], str] = {}
+
+
 def _get_or_create_named_row(table: str, name: str, dry_run_id: str) -> str | None:
-    """Helper to get or insert a row by name in a lookup table (authors, categories, genres)."""
+    """Helper to get or insert a row by name in a lookup table (authors, categories, genres) with in-memory caching."""
     clean_name = name.strip()
     if not clean_name or clean_name == "Unknown":
         return None
@@ -180,12 +185,23 @@ def _get_or_create_named_row(table: str, name: str, dry_run_id: str) -> str | No
         return dry_run_id
     if not sb_enabled():
         return None
+
+    cache_key = (table, clean_name)
+    if cache_key in _LOOKUP_CACHE:
+        return _LOOKUP_CACHE[cache_key]
+
     try:
         existing = supabase_get(table, {"name": f"eq.{clean_name}", "select": "id"})
         if existing:
-            return existing[0]["id"]
+            row_id = existing[0]["id"]
+            _LOOKUP_CACHE[cache_key] = row_id
+            return row_id
         res = supabase_post(table, {"name": clean_name})
-        return res[0]["id"] if res else None
+        if res:
+            row_id = res[0]["id"]
+            _LOOKUP_CACHE[cache_key] = row_id
+            return row_id
+        return None
     except Exception as e:
         print(f"  [Warning] {table} lookup/create failed for '{clean_name}': {e}", file=sys.stderr)
         return None
@@ -364,13 +380,18 @@ def get_or_create_story(
         raise
 
 
-def get_existing_chapter_numbers(story_id: str) -> set[int]:
+def get_existing_chapter_numbers(story_id: str) -> set[float | int]:
     """Batch fetch all existing chapter numbers for a story in 1 query."""
     if not sb_enabled() or DRY_RUN or not story_id:
         return set()
     try:
         res = supabase_get("chapters", {"story_id": f"eq.{story_id}", "select": "chapter_number"})
-        return {int(r["chapter_number"]) for r in res if "chapter_number" in r and r["chapter_number"] is not None}
+        existing = set()
+        for r in res:
+            if "chapter_number" in r and r["chapter_number"] is not None:
+                val = float(r["chapter_number"])
+                existing.add(int(val) if val.is_integer() else val)
+        return existing
     except Exception as e:
         print(f"  [Warning] Failed to batch fetch existing chapters: {e}", file=sys.stderr)
         return set()
@@ -378,16 +399,43 @@ def get_existing_chapter_numbers(story_id: str) -> set[int]:
 
 # ── R2 Upload ────────────────────────────────────────────────────────
 
+_thread_local = threading.local()
+
+
+def _get_r2_client():
+    """Returns a thread-local boto3 S3 client to avoid concurrency issues."""
+    if not hasattr(_thread_local, "client"):
+        endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        _thread_local.client = boto3.session.Session().client(
+            "s3",
+            endpoint_url=endpoint,
+            region_name="auto",
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        )
+    return _thread_local.client
+
 
 def get_existing_r2_keys(client, prefix: str) -> set[str]:
-    """Fetch all existing object keys under prefix in 1 list_objects_v2 call."""
+    """Fetch all existing object keys under prefix handling pagination."""
+    keys = set()
+    continuation_token = None
     try:
-        resp = client.list_objects_v2(Bucket=R2_BUCKET, Prefix=prefix)
-        if "Contents" in resp:
-            return {obj["Key"] for obj in resp["Contents"]}
-    except Exception:
-        pass
-    return set()
+        while True:
+            kwargs = {"Bucket": R2_BUCKET, "Prefix": prefix}
+            if continuation_token:
+                kwargs["ContinuationToken"] = continuation_token
+            resp = client.list_objects_v2(**kwargs)
+            if "Contents" in resp:
+                for obj in resp["Contents"]:
+                    keys.add(obj["Key"])
+            if resp.get("IsTruncated") and resp.get("NextContinuationToken"):
+                continuation_token = resp["NextContinuationToken"]
+            else:
+                break
+    except Exception as e:
+        print(f"  [Warning] Failed to list R2 objects for prefix '{prefix}': {e}", file=sys.stderr)
+    return keys
 
 
 def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
@@ -396,20 +444,13 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
         print(f"  [DRY-RUN] Would upload {local_dir} to s3://{R2_BUCKET}/{r2_prefix}")
         return True
 
-    endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-    client = boto3.session.Session().client(
-        "s3",
-        endpoint_url=endpoint,
-        region_name="auto",
-        aws_access_key_id=R2_ACCESS_KEY_ID,
-        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-    )
+    main_client = _get_r2_client()
     try:
         imgs = sorted([p for p in local_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS])
         if not imgs:
             return True
 
-        existing_keys = get_existing_r2_keys(client, r2_prefix)
+        existing_keys = get_existing_r2_keys(main_client, r2_prefix)
         to_upload = [img for img in imgs if f"{r2_prefix}/{img.name}" not in existing_keys]
 
         if not to_upload:
@@ -428,7 +469,8 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
         ) as pbar:
             def _upload(img: Path) -> None:
                 key = f"{r2_prefix}/{img.name}"
-                client.upload_file(
+                thread_client = _get_r2_client()
+                thread_client.upload_file(
                     str(img),
                     R2_BUCKET,
                     key,
