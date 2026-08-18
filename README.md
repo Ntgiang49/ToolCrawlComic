@@ -83,22 +83,22 @@ python sync_pipeline.py --health
 #### Option A — Standard Visible Crawl & Library Track:
 ```powershell
 # Crawl all visible chapters as WebP images
-python main.py "https://nettruyen.gg/truyen-tranh/crush-cua-toi-la-mot-dua-lang-lo" -f images -o downloads
+python main.py "https://name_comic" -f images -o downloads
 
 # Crawl a specific chapter range (e.g. chapters 1 to 20)
-python main.py "https://nettruyen.gg/truyen-tranh/crush-cua-toi-la-mot-dua-lang-lo" --start 1 --end 20 -f images -o downloads
+python main.py "https://name_comic" --start 1 --end 20 -f images -o downloads
 
 # Crawl and package directly as .cbz reader archives
-python main.py "https://nettruyen.gg/truyen-tranh/crush-cua-toi-la-mot-dua-lang-lo" -f cbz -o downloads
+python main.py "https://name_comic" -f cbz -o downloads
 ```
 
 #### Option B — Deep Full-Series Probing (Chapter 1 $\to$ Latest):
 ```powershell
 # Deep probe and download all chapters from 1 to latest as CBZ archives
-python crawl_full.py "https://nettruyen.gg/truyen-tranh/crush-cua-toi-la-mot-dua-lang-lo" -f cbz
+python crawl_full.py "https://name_comic" -f cbz
 
 # Deep probe and download as WebP image folders
-python crawl_full.py "https://nettruyen.gg/truyen-tranh/crush-cua-toi-la-mot-dua-lang-lo" -f images
+python crawl_full.py "https://name_comic" -f images
 ```
 
 ### Step 3: Library Management & Batch Updates
@@ -113,10 +113,10 @@ python main.py update -o downloads
 ### Step 4: Archive Conversion (Images $\to$ CBZ / PDF)
 ```powershell
 # Convert local image folders to CBZ archives
-python main.py convert "downloads\Crush Của Tôi Là Một Đứa Lẳng Lơ" -f cbz
+python main.py convert "downloads\name_comic" -f cbz
 
 # Convert local image folders to PDF documents
-python main.py convert "downloads\Crush Của Tôi Là Một Đứa Lẳng Lơ" -f pdf
+python main.py convert "downloads\name_comic" -f pdf
 ```
 
 ### Step 5: Cloud Synchronization & Local Prune
@@ -125,7 +125,7 @@ python main.py convert "downloads\Crush Của Tôi Là Một Đứa Lẳng Lơ" 
 python sync_pipeline.py --dry-run
 
 # Sync ONLY a specific comic to R2 & Supabase (skip others)
-python sync_pipeline.py --comic "Crush Của Tôi Là Một Đứa Lẳng Lơ" --skip-backup
+python sync_pipeline.py --comic "name_comic" --skip-backup
 
 # Full Live Sync + Google Drive Backup + Local Safe Prune
 python sync_pipeline.py --prune
@@ -133,7 +133,7 @@ python sync_pipeline.py --prune
 
 ### Step 6: Standalone Google Drive Backup (`rclone`)
 ```powershell
-rclone copy "downloads\Crush Của Tôi Là Một Đứa Lẳng Lơ" "gdrive:Comic/Crush Của Tôi Là Một Đứa Lẳng Lơ" --transfers 8 --fast-list -v
+rclone copy "downloads\name_comic" "gdrive:Comic/name_comic" --transfers 8 --fast-list -v
 ```
 
 ### Step 7: Unattended Daily Automation
