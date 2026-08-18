@@ -20,8 +20,11 @@ class TestSyncPipelineHelpers(unittest.TestCase):
         self.assertEqual(extract_chapter_number("Chapter 001"), 1)
         self.assertEqual(extract_chapter_number("Ch. 12"), 12)
         self.assertEqual(extract_chapter_number("Chapter 012.5"), 12.5)
+        self.assertEqual(extract_chapter_number("Chapter 000"), 0)
+        self.assertEqual(extract_chapter_number("Chapter 0"), 0)
+        self.assertEqual(extract_chapter_number("Vol. 1 Chapter 12"), 12)
+        self.assertEqual(extract_chapter_number("Season 2 Ch 15"), 15)
         self.assertEqual(extract_chapter_number("Prologue"), None)
-        self.assertEqual(extract_chapter_number("Chapter 000"), None)
 
 
 class TestScanDownloads(unittest.TestCase):

@@ -64,13 +64,21 @@ def slugify(text: str) -> str:
 
 
 def extract_chapter_number(folder_name: str) -> float | int | None:
-    """Extract chapter number (int or float) from folder name ('Chapter 001' → 1, 'Chapter 012.5' → 12.5)."""
-    match = re.search(r"(\d+(?:\.\d+)?)", folder_name)
+    """Extract chapter number (int or float) from folder name ('Chapter 001' → 1, 'Chapter 012.5' → 12.5, 'Chapter 0' → 0)."""
+    # Match explicit chapter keywords first to avoid capturing volume or season numbers (e.g. 'Vol. 1 Chapter 12')
+    match = re.search(r"(?:chapter|ch\.?|tập|chuong)\s*(\d+(?:\.\d+)?)", folder_name, re.IGNORECASE)
+    if not match:
+        match = re.search(r"(\d+(?:\.\d+)?)", folder_name)
     if match:
         val = float(match.group(1))
-        if val > 0:
+        if val >= 0:
             return int(val) if val.is_integer() else val
     return None
+
+
+def _natural_sort_key(p: Path):
+    """Sort filenames naturally (001, 2, 10 instead of 1, 10, 2)."""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", p.name)]
 
 
 def scan_downloads(downloads: Path) -> list[dict]:
@@ -83,10 +91,10 @@ def scan_downloads(downloads: Path) -> list[dict]:
         title = comic_dir.name
         slug = slugify(title)
         meta = {}
-        meta_path = comic_dir / "meta.json"
-        if meta_path.is_file():
+        meta_file = comic_dir / "meta.json"
+        if meta_file.exists():
             try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -98,7 +106,8 @@ def scan_downloads(downloads: Path) -> list[dict]:
             if ch_num is None:
                 continue
             images = sorted(
-                f for f in ch_dir.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS
+                (f for f in ch_dir.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS),
+                key=_natural_sort_key,
             )
             if not images:
                 continue
@@ -417,12 +426,14 @@ def _get_r2_client():
 
 
 def get_existing_r2_keys(client, prefix: str) -> set[str]:
-    """Fetch all existing object keys under prefix handling pagination."""
+    """Fetch all existing object keys under prefix handling pagination with strict trailing slash prefixing."""
     keys = set()
     continuation_token = None
+    # Ensure strict prefix boundary to avoid prefix overlap bleed (e.g. ch_1 matching ch_10, ch_100)
+    query_prefix = prefix if prefix.endswith("/") else f"{prefix}/"
     try:
         while True:
-            kwargs = {"Bucket": R2_BUCKET, "Prefix": prefix}
+            kwargs = {"Bucket": R2_BUCKET, "Prefix": query_prefix}
             if continuation_token:
                 kwargs["ContinuationToken"] = continuation_token
             resp = client.list_objects_v2(**kwargs)
@@ -434,12 +445,12 @@ def get_existing_r2_keys(client, prefix: str) -> set[str]:
             else:
                 break
     except Exception as e:
-        print(f"  [Warning] Failed to list R2 objects for prefix '{prefix}': {e}", file=sys.stderr)
+        print(f"  [Warning] Failed to list R2 objects for prefix '{query_prefix}': {e}", file=sys.stderr)
     return keys
 
 
 def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
-    """Upload chapter images to R2 with tqdm byte progress bar."""
+    """Upload chapter images to R2 with thread-safe tqdm byte progress bar."""
     if DRY_RUN:
         print(f"  [DRY-RUN] Would upload {local_dir} to s3://{R2_BUCKET}/{r2_prefix}")
         return True
@@ -448,7 +459,8 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
     try:
         imgs = sorted([p for p in local_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS])
         if not imgs:
-            return True
+            print(f"  [Warning] No images found in {local_dir} to upload.", file=sys.stderr)
+            return False
 
         existing_keys = get_existing_r2_keys(main_client, r2_prefix)
         to_upload = [img for img in imgs if f"{r2_prefix}/{img.name}" not in existing_keys]
@@ -458,6 +470,7 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
             return True
 
         total_bytes = sum(p.stat().st_size for p in to_upload)
+        pbar_lock = threading.Lock()
 
         with tqdm(
             total=total_bytes,
@@ -470,11 +483,16 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
             def _upload(img: Path) -> None:
                 key = f"{r2_prefix}/{img.name}"
                 thread_client = _get_r2_client()
+                
+                def _safe_update(bytes_transferred: int) -> None:
+                    with pbar_lock:
+                        pbar.update(bytes_transferred)
+
                 thread_client.upload_file(
                     str(img),
                     R2_BUCKET,
                     key,
-                    Callback=lambda b: pbar.update(b),
+                    Callback=_safe_update,
                 )
 
             with ThreadPoolExecutor(max_workers=8) as ex:
@@ -491,14 +509,14 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
 
 
 def backup_to_drive(downloads_dir: Path) -> bool:
-    """Run rclone copy to backup downloads to Google Drive."""
+    """Run rclone copy to backup downloads to Google Drive with strict safety checks."""
     if SKIP_BACKUP:
         print("\n[Drive] Backup skipped (--skip-backup)")
         return True
 
     if not shutil.which("rclone"):
-        print("\n[Drive] Warning: 'rclone' executable not found in PATH. Skipping Drive backup.")
-        return True
+        print("\n[Drive] Error: 'rclone' executable not found in PATH. Aborting Drive backup to prevent unsafe local pruning.", file=sys.stderr)
+        return False
 
     if DRY_RUN:
         print(f"\n[DRY-RUN] Would run: rclone copy \"{downloads_dir}\" {RCLONE_REMOTE} --transfers 8 --fast-list")
