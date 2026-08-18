@@ -60,16 +60,28 @@ RCLONE_REMOTE=gdrive:Comic
 |---|---|
 | `python main.py <URL>` | Download comic & track in library |
 | `python main.py update` | Batch update all tracked comics |
+| `python crawl_full.py` | Full chapter crawler (probe & download all missing chapters) |
 | `python sync_pipeline.py --dry-run` | Test sync pipeline without writes |
 | `python sync_pipeline.py --prune` | Upload to R2, sync Supabase, backup Drive & prune local |
-| `python main.py convert <PATH> --format cbz` | Convert folder to CBZ |
-| `python -m unittest discover -s . -p "test_*.py"` | Run full test suite (22 tests) |
-| `run_daily.bat` | Windows batch runner for daily cron |
+| `python main.py convert <PATH> --format cbz` | Convert folder to CBZ/PDF |
+| `python -m unittest discover -s . -p "test_*.py"` | Run full test suite (27 tests) |
+| `run_daily.bat` | Windows batch runner for daily cron with log rotation |
 
 ---
 
 ## 🏗️ Architecture & Decisions
 
 Detailed design rationales are recorded in Architecture Decision Records:
-- [ADR-001: Cloud Sync Pipeline Architecture](file:///docs/decisions/ADR-001-cloud-sync-pipeline-architecture.md)
-- [ADR-002: Relational Metadata & Junction Tables](file:///docs/decisions/ADR-002-relational-metadata-and-junction-tables.md)
+- [ADR-001: Cloud Sync Pipeline Architecture](docs/decisions/ADR-001-cloud-sync-pipeline-architecture.md)
+- [ADR-002: Relational Metadata & Junction Tables](docs/decisions/ADR-002-relational-metadata-and-junction-tables.md)
+- [ADR-003: Deprecation & Schema Migration Strategy](docs/decisions/ADR-003-deprecation-and-schema-migration-strategy.md)
+- [ADR-004: Concurrency Safety & HTTP Connection Pooling](docs/decisions/ADR-004-concurrency-safety-and-http-connection-pooling.md)
+
+---
+
+## 🧪 CI/CD Quality Gates
+Automated checks run via GitHub Actions on Python 3.11, 3.12, and 3.13:
+- Static syntax checking & linting (`flake8`)
+- Unit test suite execution
+- Pipeline dry-run verification
+- Weekly Dependabot dependency security audits
