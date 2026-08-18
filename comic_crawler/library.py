@@ -1,5 +1,6 @@
 import json
 import os
+import warnings
 from datetime import datetime
 from typing import Dict, Any
 
@@ -43,7 +44,15 @@ class LibraryManager:
         if "comics" not in self.data:
             self.data["comics"] = {}
 
-        fmt = kwargs.get("format", export_format)
+        if "format" in kwargs:
+            warnings.warn(
+                "The 'format' argument in add_or_update_comic is deprecated and will be removed in v2.0.0; use 'export_format' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            fmt = kwargs["format"]
+        else:
+            fmt = export_format
         existing = self.data["comics"].get(url, {})
         self.data["comics"][url] = {
             "url": url,

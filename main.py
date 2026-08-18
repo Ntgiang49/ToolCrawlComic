@@ -52,7 +52,7 @@ def sync_single_comic(crawler: ComicCrawler, library: LibraryManager, url: str, 
     library.add_or_update_comic(
         url=url, 
         title=title, 
-        format=export_format, 
+        export_format=export_format, 
         threads=crawler.num_threads, 
         total_chapters=len(chapters)
     )
