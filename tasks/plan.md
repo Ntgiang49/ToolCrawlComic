@@ -23,44 +23,44 @@ Implement an in-memory image compression, dimension clamping, and deduplication 
 ## Task Breakdown
 
 ### Phase 1: Image Processing Module
-- [ ] **Task 1: Build `ImageProcessor` Engine (`comic_crawler/image_processor.py`)**
+- [x] **Task 1: Build `ImageProcessor` Engine (`comic_crawler/image_processor.py`)**
   - Implement in-memory validation, corruption check, dimension resizing ($\le 1400$px), alpha flattening, and WebP transcoding.
   - Implement WebP 16,383px dimension fallback to JPEG.
   - Compute SHA-256 content checksum and return typed metadata (`ProcessedImage`).
   - *Files:* `comic_crawler/image_processor.py`
   - *Scope:* M (1 file, self-contained engine)
 
-- [ ] **Task 2: Unit Test Suite for `ImageProcessor` (`test_image_processor.py`)**
+- [x] **Task 2: Unit Test Suite for `ImageProcessor` (`test_image_processor.py`)**
   - Test PNG $\to$ WebP conversion, B&W scans, alpha flattening, width downsizing, corrupt image rejection, and SHA-256 hash consistency.
   - *Files:* `test_image_processor.py`
   - *Scope:* S (1 test file)
 
 ### Checkpoint 1: Image Processing Foundation
-- [ ] `python -m unittest test_image_processor.py` passes with 100% green tests.
+- [x] `python -m unittest test_image_processor.py` passes with 100% green tests.
 
 ---
 
 ### Phase 2: Crawler Integration
-- [ ] **Task 3: Integrate Inline Optimization into `ComicCrawler` (`comic_crawler/core.py`)**
+- [x] **Task 3: Integrate Inline Optimization into `ComicCrawler` (`comic_crawler/core.py`)**
   - Hook `ImageProcessor` into `download_image()`.
   - Store compressed `.webp` directly in chapter folders when crawling raw images or compiling CBZ archives.
   - Update `IMAGE_EXTS` across all crawler modules to include `.webp`.
   - *Files:* `comic_crawler/core.py`, `comic_crawler/exporter.py`
   - *Scope:* S (2 files)
 
-- [ ] **Task 4: Update Exporter & CLI Format Handlers (`main.py`, `comic_crawler/exporter.py`)**
+- [x] **Task 4: Update Exporter & CLI Format Handlers (`main.py`, `comic_crawler/exporter.py`)**
   - Ensure `.cbz` and `.pdf` exporters seamlessly pack `.webp` files.
   - *Files:* `main.py`, `comic_crawler/exporter.py`
   - *Scope:* S (2 files)
 
 ### Checkpoint 2: Crawler & Export Flow
-- [ ] Crawling a live test chapter outputs optimized `.webp` files under 200KB.
-- [ ] Converting to CBZ produces valid `.cbz` reader archives containing `.webp` files.
+- [x] Crawling a live test chapter outputs optimized `.webp` files under 200KB.
+- [x] Converting to CBZ produces valid `.cbz` reader archives containing `.webp` files.
 
 ---
 
 ### Phase 3: Cloudflare R2 Upload & Supabase Pipeline Hardening
-- [ ] **Task 5: Upgrade R2 Uploader with CDN Caching & WebP Headers (`sync_pipeline.py`)**
+- [x] **Task 5: Upgrade R2 Uploader with CDN Caching & WebP Headers (`sync_pipeline.py`)**
   - Set `ContentType="image/webp"` (or `"image/jpeg"` fallback).
   - Set `CacheControl="public, max-age=31536000, immutable"`.
   - Add `sha256-hash`, `image-width`, and `image-height` to S3 object metadata.
@@ -68,14 +68,14 @@ Implement an in-memory image compression, dimension clamping, and deduplication 
   - *Files:* `sync_pipeline.py`
   - *Scope:* S (1 file)
 
-- [ ] **Task 6: Extended Sync & Pagination Tests (`test_sync_pipeline.py`)**
+- [x] **Task 6: Extended Sync & Pagination Tests (`test_sync_pipeline.py`)**
   - Add unit tests verifying `ContentType`, `CacheControl`, and metadata formatting in R2 uploads.
   - *Files:* `test_sync_pipeline.py`
   - *Scope:* S (1 file)
 
 ### Checkpoint 3: End-to-End Pipeline & Storage Metrics
-- [ ] Full unit test suite passes.
-- [ ] `sync_pipeline.py --dry-run` validates all WebP headers and Supabase payloads.
+- [x] Full unit test suite passes.
+- [x] `sync_pipeline.py --dry-run` validates all WebP headers and Supabase payloads.
 
 ---
 
