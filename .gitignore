@@ -6,3 +6,5 @@ __pycache__/
 sync.log
 sync.err
 crawl_daily.log
+*.old
+*.tmp

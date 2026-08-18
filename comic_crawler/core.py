@@ -16,6 +16,16 @@ from .chapter_namer import ChapterNamer
 from .utils import sanitize_filename, make_absolute_url
 
 
+try:
+    import lxml  # noqa: F401
+    HTML_PARSER = "lxml"
+except ImportError:
+    HTML_PARSER = "html.parser"
+
+
+from requests.adapters import HTTPAdapter
+
+
 def _clean_field(text: str, prefix: str = "") -> str:
     """Strip prefix, leading colon/whitespace, and trailing spaces."""
     if not text:
@@ -31,6 +41,20 @@ class ComicCrawler:
         self.config_loader = ConfigLoader(config_path)
         self.num_threads = num_threads
         self.session = requests.Session()
+        pool_size = max(10, num_threads * 2)
+        adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def close(self):
+        if hasattr(self, "session") and self.session:
+            self.session.close()
 
     def _fetch_html(self, url: str, headers: Dict[str, str]) -> str:
         """Fetches HTML content with automatic retries."""
@@ -52,7 +76,7 @@ class ComicCrawler:
         selectors = site_config["selectors"]
 
         html = self._fetch_html(url, headers)
-        soup = BeautifulSoup(html, "lxml" if "lxml" in BeautifulSoup.__dict__ else "html.parser")
+        soup = BeautifulSoup(html, HTML_PARSER)
 
         # 1. Title
         title_elem = soup.select_one(selectors.get("comic_title", "h1"))
@@ -82,9 +106,11 @@ class ComicCrawler:
         # 5. Chapter Links
         chapter_nodes = soup.select(selectors.get("chapter_list", "a[href*='chapter']"))
         filter_same = selectors.get("filter_same_comic", False)
-        title_blacklist = selectors.get("chapter_title_blacklist", [])
+        raw_blacklist = selectors.get("chapter_title_blacklist", [])
+        title_blacklist = {b.strip().lower() for b in raw_blacklist if b}
         comic_path = urlparse(url).path.rstrip("/") + "/"
         raw_chapters = []
+        seen_urls = set()
 
         for idx, node in enumerate(chapter_nodes):
             href = node.get("href")
@@ -94,18 +120,22 @@ class ComicCrawler:
             if filter_same and not urlparse(abs_url).path.startswith(comic_path):
                 continue
             raw_title = node.get_text(strip=True) or f"Chapter_{idx + 1}"
-            if raw_title in title_blacklist:
+            if raw_title.lower() in title_blacklist:
                 continue
             if not re.search(r"\d", raw_title):
-                m = re.search(r"chuong-([0-9.]+)", href)
+                m = re.search(r"(?:chuong|chapter)[-_/]?([0-9.]+)", href, re.IGNORECASE)
                 if m:
                     raw_title = f"Chapter {m.group(1)}"
+                else:
+                    continue
 
-            if not any(ch["url"] == abs_url for ch in raw_chapters):
+            if abs_url not in seen_urls:
+                seen_urls.add(abs_url)
                 raw_chapters.append({"raw_title": raw_title, "url": abs_url})
 
-        # Chronological order (1 to N)
-        if raw_chapters:
+        # Chronological order
+        chapter_order = site_config.get("chapter_order", "desc").lower()
+        if chapter_order == "desc" and raw_chapters:
             raw_chapters.reverse()
 
         total_count = len(raw_chapters)
@@ -129,7 +159,7 @@ class ComicCrawler:
     def extract_chapter_images(self, chapter_url: str, site_config: Dict[str, Any]) -> List[str]:
         """Extracts image URLs from a specific chapter page."""
         html = self._fetch_html(chapter_url, site_config["headers"])
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, HTML_PARSER)
 
         selectors = site_config["selectors"]
         img_nodes = soup.select(selectors.get("page_images", "img"))
@@ -151,11 +181,10 @@ class ComicCrawler:
         ext_map = {"cbz": ".cbz", "pdf": ".pdf"}
         target = os.path.join(output_dir, f"{ch_name}{ext_map[export_format]}") if export_format in ext_map else os.path.join(output_dir, ch_name)
 
-        if os.path.exists(target):
-            if os.path.isfile(target) and os.path.getsize(target) > 0:
-                return True, target
-            if os.path.isdir(target) and len(os.listdir(target)) > 0:
-                return True, target
+        if os.path.isfile(target) and os.path.getsize(target) > 0:
+            return True, target
+        if os.path.isdir(target) and any(os.scandir(target)):
+            return True, target
         return False, target
 
     def download_image(self, img_url: str, save_path: str, headers: Dict[str, str]) -> bool:
@@ -216,10 +245,8 @@ class ComicCrawler:
             return False, f"Failed to download images for {chapter_title}"
 
         try:
-            if export_format == "cbz":
-                ComicExporter.export_to_cbz(valid_paths, os.path.join(output_dir, f"{ch_name}.cbz"))
-            elif export_format == "pdf":
-                ComicExporter.export_to_pdf(valid_paths, os.path.join(output_dir, f"{ch_name}.pdf"))
+            if export_format in ("cbz", "pdf"):
+                ComicExporter._export_to_target(valid_paths, os.path.join(output_dir, ch_name), export_format)
             else:
                 final_dest = os.path.join(output_dir, ch_name)
                 os.makedirs(final_dest, exist_ok=True)

@@ -19,9 +19,12 @@ class TestSyncPipelineHelpers(unittest.TestCase):
     def test_extract_chapter_number(self):
         self.assertEqual(extract_chapter_number("Chapter 001"), 1)
         self.assertEqual(extract_chapter_number("Ch. 12"), 12)
-        self.assertEqual(extract_chapter_number("Chapter 012.5"), 12) # Truncates decimal
+        self.assertEqual(extract_chapter_number("Chapter 012.5"), 12.5)
+        self.assertEqual(extract_chapter_number("Chapter 000"), 0)
+        self.assertEqual(extract_chapter_number("Chapter 0"), 0)
+        self.assertEqual(extract_chapter_number("Vol. 1 Chapter 12"), 12)
+        self.assertEqual(extract_chapter_number("Season 2 Ch 15"), 15)
         self.assertEqual(extract_chapter_number("Prologue"), None)
-        self.assertEqual(extract_chapter_number("Chapter 000"), None)
 
 
 class TestScanDownloads(unittest.TestCase):
@@ -77,6 +80,23 @@ class TestSupabaseOperations(unittest.TestCase):
         finally:
             sp.DRY_RUN = saved_dry
 
+    @patch("sync_pipeline.supabase_get")
+    def test_get_existing_chapter_numbers_pagination(self, mock_get):
+        sp.SUPABASE_URL = "https://x.supabase.co"
+        sp.SUPABASE_KEY = "key"
+        sp.DRY_RUN = False
+
+        page1 = [{"chapter_number": i} for i in range(1, 1001)]
+        page2 = [{"chapter_number": i} for i in range(1001, 1050)]
+        mock_get.side_effect = [page1, page2]
+
+        chapters = sp.get_existing_chapter_numbers("story-123")
+        self.assertEqual(len(chapters), 1049)
+        self.assertIn(1, chapters)
+        self.assertIn(1000, chapters)
+        self.assertIn(1049, chapters)
+        self.assertEqual(mock_get.call_count, 2)
+
 
 class TestBackupAndPrune(unittest.TestCase):
     def test_backup_skip_flag(self):
@@ -127,6 +147,34 @@ class TestDiscordPayload(unittest.TestCase):
     def test_payload_reports_count(self):
         payload = build_discord_payload([{"comic": "A", "author": "Unknown", "chapter": "Ch 1"}])
         self.assertIn("1 new chapter(s)", payload["embeds"][0]["description"])
+
+    def test_payload_reports_duration(self):
+        payload = build_discord_payload([{"comic": "A", "author": "Unknown", "chapter": "Ch 1"}], duration_seconds=12.4)
+        footer = payload["embeds"][0]["footer"]["text"]
+        self.assertIn("12.4s", footer)
+
+
+class TestR2Operations(unittest.TestCase):
+    def test_get_existing_r2_keys_pagination(self):
+        mock_client = MagicMock()
+        mock_client.list_objects_v2.side_effect = [
+            {
+                "Contents": [{"Key": "chapters/comic/ch_1/001.jpg"}, {"Key": "chapters/comic/ch_1/002.jpg"}],
+                "IsTruncated": True,
+                "NextContinuationToken": "token-123"
+            },
+            {
+                "Contents": [{"Key": "chapters/comic/ch_1/003.jpg"}],
+                "IsTruncated": False
+            }
+        ]
+
+        keys = sp.get_existing_r2_keys(mock_client, "chapters/comic/ch_1")
+        self.assertEqual(len(keys), 3)
+        self.assertIn("chapters/comic/ch_1/001.jpg", keys)
+        self.assertIn("chapters/comic/ch_1/002.jpg", keys)
+        self.assertIn("chapters/comic/ch_1/003.jpg", keys)
+        self.assertEqual(mock_client.list_objects_v2.call_count, 2)
 
 
 if __name__ == '__main__':

@@ -11,6 +11,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 if sys.stdout and hasattr(sys.stdout, 'buffer'):
@@ -62,13 +63,22 @@ def slugify(text: str) -> str:
     return text.strip("-")
 
 
-def extract_chapter_number(folder_name: str) -> int | None:
-    """Extract integer chapter number from folder name ('Chapter 001' → 1)."""
-    match = re.search(r"(\d+)", folder_name)
+def extract_chapter_number(folder_name: str) -> float | int | None:
+    """Extract chapter number (int or float) from folder name ('Chapter 001' → 1, 'Chapter 012.5' → 12.5, 'Chapter 0' → 0)."""
+    # Match explicit chapter keywords first to avoid capturing volume or season numbers (e.g. 'Vol. 1 Chapter 12')
+    match = re.search(r"(?:chapter|ch\.?|tập|chuong)\s*(\d+(?:\.\d+)?)", folder_name, re.IGNORECASE)
+    if not match:
+        match = re.search(r"(\d+(?:\.\d+)?)", folder_name)
     if match:
-        num = int(match.group(1))
-        return num if num > 0 else None
+        val = float(match.group(1))
+        if val >= 0:
+            return int(val) if val.is_integer() else val
     return None
+
+
+def _natural_sort_key(p: Path):
+    """Sort filenames naturally (001, 2, 10 instead of 1, 10, 2)."""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", p.name)]
 
 
 def scan_downloads(downloads: Path) -> list[dict]:
@@ -81,10 +91,10 @@ def scan_downloads(downloads: Path) -> list[dict]:
         title = comic_dir.name
         slug = slugify(title)
         meta = {}
-        meta_path = comic_dir / "meta.json"
-        if meta_path.is_file():
+        meta_file = comic_dir / "meta.json"
+        if meta_file.exists():
             try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -96,7 +106,8 @@ def scan_downloads(downloads: Path) -> list[dict]:
             if ch_num is None:
                 continue
             images = sorted(
-                f for f in ch_dir.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS
+                (f for f in ch_dir.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS),
+                key=_natural_sort_key,
             )
             if not images:
                 continue
@@ -171,8 +182,11 @@ def supabase_patch(table: str, params: dict, data: dict) -> list:
     return resp.json()
 
 
+_LOOKUP_CACHE: dict[tuple[str, str], str] = {}
+
+
 def _get_or_create_named_row(table: str, name: str, dry_run_id: str) -> str | None:
-    """Helper to get or insert a row by name in a lookup table (authors, categories, genres)."""
+    """Helper to get or insert a row by name in a lookup table (authors, categories, genres) with in-memory caching."""
     clean_name = name.strip()
     if not clean_name or clean_name == "Unknown":
         return None
@@ -180,12 +194,23 @@ def _get_or_create_named_row(table: str, name: str, dry_run_id: str) -> str | No
         return dry_run_id
     if not sb_enabled():
         return None
+
+    cache_key = (table, clean_name)
+    if cache_key in _LOOKUP_CACHE:
+        return _LOOKUP_CACHE[cache_key]
+
     try:
         existing = supabase_get(table, {"name": f"eq.{clean_name}", "select": "id"})
         if existing:
-            return existing[0]["id"]
+            row_id = existing[0]["id"]
+            _LOOKUP_CACHE[cache_key] = row_id
+            return row_id
         res = supabase_post(table, {"name": clean_name})
-        return res[0]["id"] if res else None
+        if res:
+            row_id = res[0]["id"]
+            _LOOKUP_CACHE[cache_key] = row_id
+            return row_id
+        return None
     except Exception as e:
         print(f"  [Warning] {table} lookup/create failed for '{clean_name}': {e}", file=sys.stderr)
         return None
@@ -364,52 +389,96 @@ def get_or_create_story(
         raise
 
 
-def get_existing_chapter_numbers(story_id: str) -> set[int]:
-    """Batch fetch all existing chapter numbers for a story in 1 query."""
+def get_existing_chapter_numbers(story_id: str) -> set[float | int]:
+    """Batch fetch all existing chapter numbers for a story with PostgREST pagination."""
     if not sb_enabled() or DRY_RUN or not story_id:
         return set()
+    existing = set()
+    limit = 1000
+    offset = 0
     try:
-        res = supabase_get("chapters", {"story_id": f"eq.{story_id}", "select": "chapter_number"})
-        return {int(r["chapter_number"]) for r in res if "chapter_number" in r and r["chapter_number"] is not None}
+        while True:
+            res = supabase_get(
+                "chapters",
+                {
+                    "story_id": f"eq.{story_id}",
+                    "select": "chapter_number",
+                    "limit": str(limit),
+                    "offset": str(offset),
+                },
+            )
+            if not res:
+                break
+            for r in res:
+                if "chapter_number" in r and r["chapter_number"] is not None:
+                    val = float(r["chapter_number"])
+                    existing.add(int(val) if val.is_integer() else val)
+            if len(res) < limit:
+                break
+            offset += limit
+        return existing
     except Exception as e:
         print(f"  [Warning] Failed to batch fetch existing chapters: {e}", file=sys.stderr)
-        return set()
+        return existing
 
 
 # ── R2 Upload ────────────────────────────────────────────────────────
 
+_thread_local = threading.local()
+
+
+def _get_r2_client():
+    """Returns a thread-local boto3 S3 client to avoid concurrency issues."""
+    if not hasattr(_thread_local, "client"):
+        endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_ACCOUNT_ID else None
+        _thread_local.client = boto3.session.Session().client(
+            "s3",
+            endpoint_url=endpoint,
+            region_name="auto",
+            aws_access_key_id=R2_ACCESS_KEY_ID or None,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY or None,
+        )
+    return _thread_local.client
+
 
 def get_existing_r2_keys(client, prefix: str) -> set[str]:
-    """Fetch all existing object keys under prefix in 1 list_objects_v2 call."""
+    """Fetch all existing object keys under prefix handling pagination with strict trailing slash prefixing."""
+    keys = set()
+    continuation_token = None
+    # Ensure strict prefix boundary to avoid prefix overlap bleed (e.g. ch_1 matching ch_10, ch_100)
+    query_prefix = prefix if prefix.endswith("/") else f"{prefix}/"
     try:
-        resp = client.list_objects_v2(Bucket=R2_BUCKET, Prefix=prefix)
-        if "Contents" in resp:
-            return {obj["Key"] for obj in resp["Contents"]}
-    except Exception:
-        pass
-    return set()
+        while True:
+            kwargs = {"Bucket": R2_BUCKET, "Prefix": query_prefix}
+            if continuation_token:
+                kwargs["ContinuationToken"] = continuation_token
+            resp = client.list_objects_v2(**kwargs)
+            if "Contents" in resp:
+                for obj in resp["Contents"]:
+                    keys.add(obj["Key"])
+            if resp.get("IsTruncated") and resp.get("NextContinuationToken"):
+                continuation_token = resp["NextContinuationToken"]
+            else:
+                break
+    except Exception as e:
+        print(f"  [Warning] Failed to list R2 objects for prefix '{query_prefix}': {e}", file=sys.stderr)
+    return keys
 
 
 def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
-    """Upload chapter images to R2 with tqdm byte progress bar."""
+    """Upload chapter images to R2 with thread-safe tqdm byte progress bar."""
     if DRY_RUN:
         print(f"  [DRY-RUN] Would upload {local_dir} to s3://{R2_BUCKET}/{r2_prefix}")
         return True
 
-    endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-    client = boto3.session.Session().client(
-        "s3",
-        endpoint_url=endpoint,
-        region_name="auto",
-        aws_access_key_id=R2_ACCESS_KEY_ID,
-        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-    )
+    main_client = _get_r2_client()
     try:
         imgs = sorted([p for p in local_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS])
         if not imgs:
-            return True
+            print(f"  [Warning] No images found in {local_dir} to upload.", file=sys.stderr)
+            return False
 
-        existing_keys = get_existing_r2_keys(client, r2_prefix)
+        existing_keys = get_existing_r2_keys(main_client, r2_prefix)
         to_upload = [img for img in imgs if f"{r2_prefix}/{img.name}" not in existing_keys]
 
         if not to_upload:
@@ -417,6 +486,7 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
             return True
 
         total_bytes = sum(p.stat().st_size for p in to_upload)
+        pbar_lock = threading.Lock()
 
         with tqdm(
             total=total_bytes,
@@ -428,11 +498,17 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
         ) as pbar:
             def _upload(img: Path) -> None:
                 key = f"{r2_prefix}/{img.name}"
-                client.upload_file(
+                thread_client = _get_r2_client()
+                
+                def _safe_update(bytes_transferred: int) -> None:
+                    with pbar_lock:
+                        pbar.update(bytes_transferred)
+
+                thread_client.upload_file(
                     str(img),
                     R2_BUCKET,
                     key,
-                    Callback=lambda b: pbar.update(b),
+                    Callback=_safe_update,
                 )
 
             with ThreadPoolExecutor(max_workers=8) as ex:
@@ -449,14 +525,14 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
 
 
 def backup_to_drive(downloads_dir: Path) -> bool:
-    """Run rclone copy to backup downloads to Google Drive."""
+    """Run rclone copy to backup downloads to Google Drive with strict safety checks."""
     if SKIP_BACKUP:
         print("\n[Drive] Backup skipped (--skip-backup)")
         return True
 
     if not shutil.which("rclone"):
-        print("\n[Drive] Warning: 'rclone' executable not found in PATH. Skipping Drive backup.")
-        return True
+        print("\n[Drive] Error: 'rclone' executable not found in PATH. Aborting Drive backup to prevent unsafe local pruning.", file=sys.stderr)
+        return False
 
     if DRY_RUN:
         print(f"\n[DRY-RUN] Would run: rclone copy \"{downloads_dir}\" {RCLONE_REMOTE} --transfers 8 --fast-list")
@@ -518,8 +594,8 @@ def prune_local_chapters(synced_chapters: list[dict]) -> None:
 # ── Discord ──────────────────────────────────────────────────────────
 
 
-def build_discord_payload(summary: list[dict]) -> dict:
-    """Rich Discord embed payload from sync summary."""
+def build_discord_payload(summary: list[dict], duration_seconds: float = 0.0) -> dict:
+    """Rich Discord embed payload from sync summary with timing observability."""
     comics_map: dict[str, dict] = {}
     for item in summary:
         c_name = item["comic"]
@@ -546,6 +622,12 @@ def build_discord_payload(summary: list[dict]) -> dict:
             }
         )
 
+    footer_text = (
+        f"Comic Crawler Easy • R2 + Supabase • Duration: {duration_seconds:.1f}s"
+        if duration_seconds > 0
+        else "Comic Crawler Easy • R2 + Supabase"
+    )
+
     return {
         "embeds": [
             {
@@ -553,20 +635,20 @@ def build_discord_payload(summary: list[dict]) -> dict:
                 "description": f"🚀 **Uploaded {len(summary)} new chapter(s)** across **{len(comics_map)} comic(s)**" if summary else "😴 No new chapters synced today",
                 "color": 3066993 if summary else 9807270,
                 "fields": fields,
-                "footer": {"text": "Comic Crawler Easy • R2 + Supabase"},
+                "footer": {"text": footer_text},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         ]
     }
 
 
-def send_discord(summary: list[dict]) -> None:
-    """Send Discord webhook notification."""
+def send_discord(summary: list[dict], duration_seconds: float = 0.0) -> None:
+    """Send Discord webhook notification with execution duration."""
     if not DISCORD_WEBHOOK:
         print("DISCORD_WEBHOOK_URL not set, skipping notification")
         return
 
-    payload = build_discord_payload(summary)
+    payload = build_discord_payload(summary, duration_seconds)
     if DRY_RUN:
         print(f"\n[DRY-RUN] Discord payload:\n{json.dumps(payload, indent=2, ensure_ascii=False)}")
         return
@@ -691,15 +773,17 @@ def main() -> None:
         elif not drive_ok:
             print("\n[Prune] Skipped pruning because Drive backup failed.")
 
+        elapsed_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
+
         # Record metrics in Supabase
         if sb_enabled():
-            log_msg = f"Synced {len(summary)} chapters across {len(comics)} comics"
+            log_msg = f"Synced {len(summary)} chapters across {len(comics)} comics in {elapsed_sec:.1f}s"
             record_crawler_run(primary_source_id, started_at, items_seen, items_created, items_updated, log_msg, status="completed")
 
         # Discord Report
         print(f"\n{'=' * 40}")
-        print(f"Total new chapters: {len(summary)}")
-        send_discord(summary)
+        print(f"Total new chapters: {len(summary)} (completed in {elapsed_sec:.1f}s)")
+        send_discord(summary, elapsed_sec)
         print("Discord notification sent")
 
     except Exception as e:

@@ -1,5 +1,6 @@
 import json
 import os
+import warnings
 from datetime import datetime
 from typing import Dict, Any
 
@@ -23,19 +24,40 @@ class LibraryManager:
         return {"comics": {}}
 
     def save(self):
-        os.makedirs(os.path.dirname(os.path.abspath(self.file_path)), exist_ok=True)
-        with open(self.file_path, "w", encoding="utf-8") as f:
+        target_dir = os.path.dirname(os.path.abspath(self.file_path))
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+        tmp_path = self.file_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(self.data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, self.file_path)
 
-    def add_or_update_comic(self, url: str, title: str, format: str = "cbz", threads: int = 8, total_chapters: int = 0):
+    def add_or_update_comic(
+        self,
+        url: str,
+        title: str,
+        export_format: str = "cbz",
+        threads: int = 8,
+        total_chapters: int = 0,
+        **kwargs
+    ):
         if "comics" not in self.data:
             self.data["comics"] = {}
 
+        if "format" in kwargs:
+            warnings.warn(
+                "The 'format' argument in add_or_update_comic is deprecated and will be removed in v2.0.0; use 'export_format' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            fmt = kwargs["format"]
+        else:
+            fmt = export_format
         existing = self.data["comics"].get(url, {})
         self.data["comics"][url] = {
             "url": url,
             "title": title,
-            "format": format or existing.get("format", "cbz"),
+            "format": fmt or existing.get("format", "cbz"),
             "threads": threads or existing.get("threads", 8),
             "total_chapters": max(total_chapters, existing.get("total_chapters", 0)),
             "last_synced": datetime.now().strftime("%Y-%m-%d %H:%M:%S")

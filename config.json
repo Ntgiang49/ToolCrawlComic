@@ -20,10 +20,12 @@
         "description": "div.detail-content p, .detail-content",
         "chapter_list": "div.list-chapter a, ul.list-chapter a, .chapter a, a[href*='/chuong-']",
         "chapter_title": "text",
+        "chapter_title_blacklist": ["Xem thêm", "Đọc mới nhất", "Đọc từ đầu"],
         "page_images": "div.page-chapter img, div.reading-detail img, .reading img",
         "image_url_attributes": ["data-original", "data-src", "src"],
         "filter_same_comic": true
-      }
+      },
+      "chapter_order": "desc"
     },
     {
       "name": "Manganato / MangaKakalot / Chapmanganato",

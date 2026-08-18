@@ -48,8 +48,19 @@ class ComicExporter:
 
         return output_pdf_path
 
-    @staticmethod
-    def convert_directory(input_dir: str, target_format: str = "cbz") -> List[str]:
+    @classmethod
+    def _export_to_target(cls, images: List[str], base_output_path: str, target_format: str) -> str:
+        """Helper to dispatch export to target format (cbz or pdf)."""
+        if target_format == "pdf":
+            out_path = f"{base_output_path}.pdf"
+            cls.export_to_pdf(images, out_path)
+            return out_path
+        out_path = f"{base_output_path}.cbz"
+        cls.export_to_cbz(images, out_path)
+        return out_path
+
+    @classmethod
+    def convert_directory(cls, input_dir: str, target_format: str = "cbz") -> List[str]:
         """
         Scans directory containing image subfolders and converts them to .cbz or .pdf.
         """
@@ -57,7 +68,7 @@ class ComicExporter:
             raise ValueError(f"Input directory does not exist: {input_dir}")
 
         converted_files = []
-        valid_exts = {".jpg", ".jpeg", ".png", ".webp"}
+        valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
         # Case 1: Subdirectories represent chapters
         subdirs = [os.path.join(input_dir, d) for d in os.listdir(input_dir) if os.path.isdir(os.path.join(input_dir, d)) and not d.startswith("_")]
@@ -70,14 +81,8 @@ class ComicExporter:
                     if os.path.splitext(f)[1].lower() in valid_exts
                 ])
                 if images:
-                    if target_format == "cbz":
-                        out_path = os.path.join(input_dir, f"{ch_name}.cbz")
-                        ComicExporter.export_to_cbz(images, out_path)
-                        converted_files.append(out_path)
-                    elif target_format == "pdf":
-                        out_path = os.path.join(input_dir, f"{ch_name}.pdf")
-                        ComicExporter.export_to_pdf(images, out_path)
-                        converted_files.append(out_path)
+                    out_path = cls._export_to_target(images, os.path.join(input_dir, ch_name), target_format)
+                    converted_files.append(out_path)
         else:
             # Case 2: Direct folder of images
             images = sorted([
@@ -86,13 +91,7 @@ class ComicExporter:
             ])
             if images:
                 ch_name = os.path.basename(os.path.normpath(input_dir))
-                if target_format == "cbz":
-                    out_path = os.path.join(os.path.dirname(input_dir), f"{ch_name}.cbz")
-                    ComicExporter.export_to_cbz(images, out_path)
-                    converted_files.append(out_path)
-                elif target_format == "pdf":
-                    out_path = os.path.join(os.path.dirname(input_dir), f"{ch_name}.pdf")
-                    ComicExporter.export_to_pdf(images, out_path)
-                    converted_files.append(out_path)
+                out_path = cls._export_to_target(images, os.path.join(os.path.dirname(input_dir), ch_name), target_format)
+                converted_files.append(out_path)
 
         return converted_files
