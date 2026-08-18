@@ -19,10 +19,19 @@ class TestLibraryManager(unittest.TestCase):
             lib2 = LibraryManager(lib_file)
             self.assertIn("https://example.com/solo", lib2.get_all_comics())
 
-            # 3. Remove comic
+            # 3. Test export_format parameter
+            lib.add_or_update_comic("https://example.com/onepiece", "One Piece", export_format="pdf", threads=4)
+            self.assertEqual(lib.get_all_comics()["https://example.com/onepiece"]["format"], "pdf")
+
+            # 4. Remove comic
             res = lib.remove_comic("https://example.com/solo")
             self.assertTrue(res)
             self.assertNotIn("https://example.com/solo", lib.get_all_comics())
+
+            # 5. Verify atomic temp file is cleaned up after save
+            tmp_file = lib_file + ".tmp"
+            self.assertFalse(os.path.exists(tmp_file))
+            self.assertTrue(os.path.exists(lib_file))
 
 if __name__ == "__main__":
     unittest.main()

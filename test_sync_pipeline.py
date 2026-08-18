@@ -19,7 +19,7 @@ class TestSyncPipelineHelpers(unittest.TestCase):
     def test_extract_chapter_number(self):
         self.assertEqual(extract_chapter_number("Chapter 001"), 1)
         self.assertEqual(extract_chapter_number("Ch. 12"), 12)
-        self.assertEqual(extract_chapter_number("Chapter 012.5"), 12) # Truncates decimal
+        self.assertEqual(extract_chapter_number("Chapter 012.5"), 12.5)
         self.assertEqual(extract_chapter_number("Prologue"), None)
         self.assertEqual(extract_chapter_number("Chapter 000"), None)
 
@@ -127,6 +127,29 @@ class TestDiscordPayload(unittest.TestCase):
     def test_payload_reports_count(self):
         payload = build_discord_payload([{"comic": "A", "author": "Unknown", "chapter": "Ch 1"}])
         self.assertIn("1 new chapter(s)", payload["embeds"][0]["description"])
+
+
+class TestR2Operations(unittest.TestCase):
+    def test_get_existing_r2_keys_pagination(self):
+        mock_client = MagicMock()
+        mock_client.list_objects_v2.side_effect = [
+            {
+                "Contents": [{"Key": "chapters/comic/ch_1/001.jpg"}, {"Key": "chapters/comic/ch_1/002.jpg"}],
+                "IsTruncated": True,
+                "NextContinuationToken": "token-123"
+            },
+            {
+                "Contents": [{"Key": "chapters/comic/ch_1/003.jpg"}],
+                "IsTruncated": False
+            }
+        ]
+
+        keys = sp.get_existing_r2_keys(mock_client, "chapters/comic/ch_1")
+        self.assertEqual(len(keys), 3)
+        self.assertIn("chapters/comic/ch_1/001.jpg", keys)
+        self.assertIn("chapters/comic/ch_1/002.jpg", keys)
+        self.assertIn("chapters/comic/ch_1/003.jpg", keys)
+        self.assertEqual(mock_client.list_objects_v2.call_count, 2)
 
 
 if __name__ == '__main__':

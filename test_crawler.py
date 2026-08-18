@@ -101,12 +101,42 @@ class TestComicCrawler(unittest.TestCase):
             self.assertTrue(os.path.exists(pdf_out))
             self.assertGreater(os.path.getsize(pdf_out), 0)
 
+    def test_parse_comic_info_blacklist_and_ordering(self):
+        crawler = ComicCrawler()
+        sample_html = """
+        <html>
+            <body>
+                <h1 class="title-detail">My Filtered Comic</h1>
+                <li class="author">Author: Someone</li>
+                <div class="list-chapter">
+                    <a href="/truyen-tranh/test/chuong-3">Chapter 3</a>
+                    <a href="/truyen-tranh/test/chuong-2">Chapter 2</a>
+                    <a href="/truyen-tranh/test/chuong-1">Chapter 1</a>
+                    <a href="/truyen-tranh/test/chuong-3">Đọc mới nhất</a>
+                    <a href="/truyen-tranh/test/chuong-1">Đọc từ đầu</a>
+                    <a href="#">Xem thêm</a>
+                </div>
+            </body>
+        </html>
+        """
+        with patch.object(crawler, "_fetch_html", return_value=sample_html):
+            info = crawler.parse_comic_info("https://nettruyen.gg/truyen-tranh/test")
+            # Blacklisted items and duplicates should be filtered out
+            self.assertEqual(len(info["chapters"]), 3)
+            self.assertEqual(info["chapters"][0]["title"], "Chapter 001")
+            self.assertEqual(info["chapters"][1]["title"], "Chapter 002")
+            self.assertEqual(info["chapters"][2]["title"], "Chapter 003")
+
+    def test_context_manager(self):
+        with ComicCrawler() as crawler:
+            self.assertIsNotNone(crawler.session)
+
     def test_is_chapter_downloaded(self):
         crawler = ComicCrawler()
         with tempfile.TemporaryDirectory() as tmpdir:
             ch_name = "Chapter 001"
             cbz_path = os.path.join(tmpdir, "Chapter 001.cbz")
-            
+
             # 1. Verify not downloaded yet
             is_dl, _ = crawler.is_chapter_downloaded(ch_name, tmpdir, "cbz")
             self.assertFalse(is_dl)
@@ -118,6 +148,7 @@ class TestComicCrawler(unittest.TestCase):
             # 3. Verify detected as downloaded
             is_dl2, _ = crawler.is_chapter_downloaded(ch_name, tmpdir, "cbz")
             self.assertTrue(is_dl2)
+
 
 if __name__ == "__main__":
     unittest.main()
