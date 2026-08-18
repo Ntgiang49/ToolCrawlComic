@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-18
+
+### Added
+- **In-Memory ImageProcessor Engine (`comic_crawler/image_processor.py`)**: Real-time transcoding of scanned pages to WebP ($Q=81$, method=4) in RAM before disk writing or CBZ packing, achieving 65%–75% file size reduction.
+- **Dynamic Dimension Clamping**: Automatic downscaling of oversized 3K/4K scans to $\le 1,400\text{px}$ width using Lanczos resampling.
+- **WebP 16,383px Dimension Guard**: Automatic fallback to Progressive MozJPEG for extreme vertical webtoon strips exceeding WebP's hard limit.
+- **Alpha Channel Flattening**: Stripping unused transparency channels from scanned pages by flattening onto a clean white background.
+- **1-Year Immutable CDN Caching**: Attached `Cache-Control: public, max-age=31536000, immutable` and `Content-Type: image/webp` to all Cloudflare R2 uploads to maximize edge POP caching.
+- **ADR-005**: Documented architecture decisions for inline WebP optimization and CDN cache strategy.
+- **Extended Test Suite**: Added 7 new unit tests for image transcoding, corruption rejection, alpha flattening, and S3 metadata headers (36 total tests).
+
 ## [1.3.0] - 2026-08-18
 
 ### Fixed
