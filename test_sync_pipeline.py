@@ -128,6 +128,11 @@ class TestDiscordPayload(unittest.TestCase):
         payload = build_discord_payload([{"comic": "A", "author": "Unknown", "chapter": "Ch 1"}])
         self.assertIn("1 new chapter(s)", payload["embeds"][0]["description"])
 
+    def test_payload_reports_duration(self):
+        payload = build_discord_payload([{"comic": "A", "author": "Unknown", "chapter": "Ch 1"}], duration_seconds=12.4)
+        footer = payload["embeds"][0]["footer"]["text"]
+        self.assertIn("12.4s", footer)
+
 
 class TestR2Operations(unittest.TestCase):
     def test_get_existing_r2_keys_pagination(self):

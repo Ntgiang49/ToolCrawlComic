@@ -560,8 +560,8 @@ def prune_local_chapters(synced_chapters: list[dict]) -> None:
 # ── Discord ──────────────────────────────────────────────────────────
 
 
-def build_discord_payload(summary: list[dict]) -> dict:
-    """Rich Discord embed payload from sync summary."""
+def build_discord_payload(summary: list[dict], duration_seconds: float = 0.0) -> dict:
+    """Rich Discord embed payload from sync summary with timing observability."""
     comics_map: dict[str, dict] = {}
     for item in summary:
         c_name = item["comic"]
@@ -588,6 +588,12 @@ def build_discord_payload(summary: list[dict]) -> dict:
             }
         )
 
+    footer_text = (
+        f"Comic Crawler Easy • R2 + Supabase • Duration: {duration_seconds:.1f}s"
+        if duration_seconds > 0
+        else "Comic Crawler Easy • R2 + Supabase"
+    )
+
     return {
         "embeds": [
             {
@@ -595,20 +601,20 @@ def build_discord_payload(summary: list[dict]) -> dict:
                 "description": f"🚀 **Uploaded {len(summary)} new chapter(s)** across **{len(comics_map)} comic(s)**" if summary else "😴 No new chapters synced today",
                 "color": 3066993 if summary else 9807270,
                 "fields": fields,
-                "footer": {"text": "Comic Crawler Easy • R2 + Supabase"},
+                "footer": {"text": footer_text},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         ]
     }
 
 
-def send_discord(summary: list[dict]) -> None:
-    """Send Discord webhook notification."""
+def send_discord(summary: list[dict], duration_seconds: float = 0.0) -> None:
+    """Send Discord webhook notification with execution duration."""
     if not DISCORD_WEBHOOK:
         print("DISCORD_WEBHOOK_URL not set, skipping notification")
         return
 
-    payload = build_discord_payload(summary)
+    payload = build_discord_payload(summary, duration_seconds)
     if DRY_RUN:
         print(f"\n[DRY-RUN] Discord payload:\n{json.dumps(payload, indent=2, ensure_ascii=False)}")
         return
@@ -733,15 +739,17 @@ def main() -> None:
         elif not drive_ok:
             print("\n[Prune] Skipped pruning because Drive backup failed.")
 
+        elapsed_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
+
         # Record metrics in Supabase
         if sb_enabled():
-            log_msg = f"Synced {len(summary)} chapters across {len(comics)} comics"
+            log_msg = f"Synced {len(summary)} chapters across {len(comics)} comics in {elapsed_sec:.1f}s"
             record_crawler_run(primary_source_id, started_at, items_seen, items_created, items_updated, log_msg, status="completed")
 
         # Discord Report
         print(f"\n{'=' * 40}")
-        print(f"Total new chapters: {len(summary)}")
-        send_discord(summary)
+        print(f"Total new chapters: {len(summary)} (completed in {elapsed_sec:.1f}s)")
+        send_discord(summary, elapsed_sec)
         print("Discord notification sent")
 
     except Exception as e:
