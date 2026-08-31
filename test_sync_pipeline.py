@@ -28,6 +28,27 @@ class TestSyncPipelineHelpers(unittest.TestCase):
 
 
 class TestScanDownloads(unittest.TestCase):
+    def test_scan_marks_manifest_synced_chapter_as_not_pending(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            comic_dir = Path(tmpdir) / "Manifest Comic"
+            comic_dir.mkdir()
+            (comic_dir / "meta.json").write_text(json.dumps({
+                "chapters": {
+                    "1": {"number": 1, "synced": True},
+                    "2": {"number": 2, "synced": False},
+                }
+            }), encoding="utf-8")
+            for number in (1, 2):
+                chapter_dir = comic_dir / f"Chapter {number}"
+                chapter_dir.mkdir()
+                (chapter_dir / "001.jpg").write_bytes(b"image")
+
+            chapters = scan_downloads(Path(tmpdir))[0]["chapters"]
+
+            self.assertEqual(len(chapters), 1)
+            self.assertEqual(chapters[0]["number"], 2)
+            self.assertTrue(chapters[0]["sync_pending"])
+
     def test_scan_with_meta_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             comic_dir = Path(tmpdir) / "Test Comic"
@@ -55,6 +76,21 @@ class TestScanDownloads(unittest.TestCase):
             self.assertEqual(c["url"], "https://nettruyen.gg/truyen/test-comic")
             self.assertEqual(len(c["chapters"]), 1)
             self.assertEqual(c["chapters"][0]["number"], 1)
+
+    def test_scan_cbz_chapter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            comic_dir = Path(tmpdir) / "CBZ Comic"
+            comic_dir.mkdir()
+            cbz_file = comic_dir / "Chapter 001.cbz"
+            cbz_file.write_bytes(b"mock-cbz")
+
+            comics = scan_downloads(Path(tmpdir))
+
+            self.assertEqual(len(comics), 1)
+            chapter = comics[0]["chapters"][0]
+            self.assertEqual(chapter["number"], 1)
+            self.assertEqual(chapter["format"], "cbz")
+            self.assertEqual(chapter["file"], cbz_file)
 
 
 class TestSupabaseOperations(unittest.TestCase):
@@ -192,6 +228,23 @@ class TestR2Operations(unittest.TestCase):
                 mock_client.upload_file.assert_called_once()
                 args, kwargs = mock_client.upload_file.call_args
                 self.assertEqual(kwargs["ExtraArgs"]["ContentType"], "image/webp")
+
+    def test_upload_cbz_to_r2_with_archive_headers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cbz_file = Path(tmpdir) / "Chapter 001.cbz"
+            cbz_file.write_bytes(b"mock-cbz-bytes")
+
+            mock_client = MagicMock()
+            mock_client.list_objects_v2.return_value = {"Contents": []}
+
+            with patch("sync_pipeline._get_r2_client", return_value=mock_client):
+                success = sp.upload_cbz_to_r2(cbz_file, "chapters/test/ch_1")
+
+            self.assertTrue(success)
+            mock_client.upload_file.assert_called_once()
+            args, kwargs = mock_client.upload_file.call_args
+            self.assertEqual(args[2], "chapters/test/ch_1/Chapter 001.cbz")
+            self.assertEqual(kwargs["ExtraArgs"]["ContentType"], "application/vnd.comicbook+zip")
 class TestHealthCheck(unittest.TestCase):
     def test_run_health_check_healthy(self):
         mock_r2 = MagicMock()

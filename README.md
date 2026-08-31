@@ -17,6 +17,7 @@ A high-throughput, multi-threaded comic scraper and cloud synchronization pipeli
 - **☁️ Cloudflare R2 Storage & Immutable CDN Edge Caching**:
   - Thread-isolated `boto3` client instances (`_get_r2_client()`) preventing race conditions.
   - Enforces `ContentType: image/webp` and `Cache-Control: public, max-age=31536000, immutable` for 1-year Cloudflare Edge POP caching with ~99% cache hit ratios.
+  - Supports uploading `.cbz` chapter archives directly with immutable archive caching.
   - O(1) prefix pagination with strict trailing-slash delimiters preventing prefix overlap bleed.
 
 - **🗄️ Supabase PostgreSQL Relational Metadata Core**:
@@ -28,6 +29,7 @@ A high-throughput, multi-threaded comic scraper and cloud synchronization pipeli
 - **🔍 Full-Series Deep Prober (`crawl_full.py`)**:
   - Bypasses frontend website pagination and truncation limits (e.g. NetTruyen's 20-chapter view) by concurrently probing server endpoints from `Chapter 001` to the latest chapter.
   - Supports outputting directly to `.cbz` reader archives or WebP image folders.
+  - Maintains a per-comic chapter manifest in `meta.json`, so chapters already synchronized and pruned locally are not downloaded again.
 
 - **💾 Google Drive Backup & Safe Pruning (`rclone`)**:
   - Mirrors comic catalogs and `.cbz` archives to `gdrive:Comic/` with `--transfers 8 --fast-list`.
@@ -49,6 +51,7 @@ cp secrets.env.template secrets.env
 ```
 
 Configure your credentials in `secrets.env`:
+
 ```env
 # Cloudflare R2 (S3-Compatible)
 R2_ACCOUNT_ID=your_account_id
@@ -74,6 +77,7 @@ RCLONE_REMOTE=gdrive:Comic
 ## 📖 Complete End-to-End Operational Guide
 
 ### Step 1: Run Pre-Flight Diagnostics
+
 ```powershell
 python sync_pipeline.py --health
 ```
@@ -81,6 +85,7 @@ python sync_pipeline.py --health
 ### Step 2: Crawl Comic Chapters
 
 #### Option A — Standard Visible Crawl & Library Track:
+
 ```powershell
 # Crawl all visible chapters as WebP images
 python main.py "https://name_comic" -f images -o downloads
@@ -93,6 +98,7 @@ python main.py "https://name_comic" -f cbz -o downloads
 ```
 
 #### Option B — Deep Full-Series Probing (Chapter 1 $\to$ Latest):
+
 ```powershell
 # Deep probe and download all chapters from 1 to latest as CBZ archives
 python crawl_full.py "https://name_comic" -f cbz
@@ -102,6 +108,7 @@ python crawl_full.py "https://name_comic" -f images
 ```
 
 ### Step 3: Library Management & Batch Updates
+
 ```powershell
 # List all tracked favorite comics
 python main.py list
@@ -111,6 +118,7 @@ python main.py update -o downloads
 ```
 
 ### Step 4: Archive Conversion (Images $\to$ CBZ / PDF)
+
 ```powershell
 # Convert local image folders to CBZ archives
 python main.py convert "downloads\name_comic" -f cbz
@@ -120,23 +128,28 @@ python main.py convert "downloads\name_comic" -f pdf
 ```
 
 ### Step 5: Cloud Synchronization & Local Prune
+
 ```powershell
 # Dry Run: Simulate R2 uploads, Supabase SQL inserts & Discord embed
 python sync_pipeline.py --dry-run
 
-# Sync ONLY a specific comic to R2 & Supabase (skip others)
+# Sync ONLY a specific comic (images or .cbz archives) to R2 & Supabase (skip others)
 python sync_pipeline.py --comic "name_comic" --skip-backup
 
 # Full Live Sync + Google Drive Backup + Local Safe Prune
 python sync_pipeline.py --prune
 ```
 
+Each comic folder contains a `meta.json` manifest with its chapter list and synchronization state. On the next crawl, newly discovered chapters are added to this manifest; chapters marked `synced: true` are not downloaded again even when their local files were pruned. The sync pipeline processes only manifest entries that are still pending.
+
 ### Step 6: Standalone Google Drive Backup (`rclone`)
+
 ```powershell
 rclone copy "downloads\name_comic" "gdrive:Comic/name_comic" --transfers 8 --fast-list -v
 ```
 
 ### Step 7: Unattended Daily Automation
+
 ```cmd
 run_daily.bat
 ```
@@ -145,27 +158,28 @@ run_daily.bat
 
 ## 📋 CLI Commands Quick Reference
 
-| Command | Description |
-|:---|:---|
-| `python sync_pipeline.py --health` | Pre-flight diagnostic check verifying R2, Supabase, Drive & Discord |
-| `python main.py "<URL>" -f images` | Scrape comic chapters with inline WebP optimization & track in library |
-| `python main.py "<URL>" -f cbz` | Scrape comic and pack directly into `.cbz` reader archives |
-| `python main.py update -o downloads` | 1-Command batch update all tracked library favorites |
-| `python main.py list` | Display all tracked comics with last sync timestamps |
-| `python crawl_full.py "<URL>" -f cbz` | Deep probe & download full series (Chapter 1 $\to$ Latest) as CBZ |
-| `python crawl_full.py "<URL>" -f images` | Deep probe & download full series (Chapter 1 $\to$ Latest) as WebP images |
-| `python main.py convert "<PATH>" -f cbz` | Convert downloaded image directory to `.cbz` files |
-| `python sync_pipeline.py --dry-run` | Safe simulation of R2 upload, DB sync, and Discord report |
-| `python sync_pipeline.py --comic "<NAME>"` | Target sync and upload for a specific comic |
-| `python sync_pipeline.py --prune` | Live sync to R2 & Supabase, backup to Google Drive, and prune local files |
-| `python -m unittest discover -s . -p "test_*.py"` | Run the 41-test automated unit test suite |
-| `run_daily.bat` | Windows batch runner for automated daily unattended runs |
+| Command                                           | Description                                                               |
+| :------------------------------------------------ | :------------------------------------------------------------------------ |
+| `python sync_pipeline.py --health`                | Pre-flight diagnostic check verifying R2, Supabase, Drive & Discord       |
+| `python main.py "<URL>" -f images`                | Scrape comic chapters with inline WebP optimization & track in library    |
+| `python main.py "<URL>" -f cbz`                   | Scrape comic and pack directly into `.cbz` reader archives                |
+| `python main.py update -o downloads`              | 1-Command batch update all tracked library favorites                      |
+| `python main.py list`                             | Display all tracked comics with last sync timestamps                      |
+| `python crawl_full.py "<URL>" -f cbz`             | Deep probe & download full series (Chapter 1 $\to$ Latest) as CBZ         |
+| `python crawl_full.py "<URL>" -f images`          | Deep probe & download full series (Chapter 1 $\to$ Latest) as WebP images |
+| `python main.py convert "<PATH>" -f cbz`          | Convert downloaded image directory to `.cbz` files                        |
+| `python sync_pipeline.py --dry-run`               | Safe simulation of R2 upload, DB sync, and Discord report                 |
+| `python sync_pipeline.py --comic "<NAME>"`        | Target sync and upload for a specific comic                               |
+| `python sync_pipeline.py --prune`                 | Live sync to R2 & Supabase, backup to Google Drive, and prune local files |
+| `python -m unittest discover -s . -p "test_*.py"` | Run the 41-test automated unit test suite                                 |
+| `run_daily.bat`                                   | Windows batch runner for automated daily unattended runs                  |
 
 ---
 
 ## 🏗️ Architecture & Decision Records
 
 Detailed engineering rationales are documented in Architecture Decision Records:
+
 - [ADR-001: Cloud Sync Pipeline Architecture](docs/decisions/ADR-001-cloud-sync-pipeline-architecture.md)
 - [ADR-002: Relational Metadata & Junction Tables](docs/decisions/ADR-002-relational-metadata-and-junction-tables.md)
 - [ADR-003: Deprecation & Schema Migration Strategy](docs/decisions/ADR-003-deprecation-and-schema-migration-strategy.md)
@@ -177,6 +191,7 @@ Detailed engineering rationales are documented in Architecture Decision Records:
 ## 🧪 Automated Quality Gates
 
 Every commit is verified against an automated unit test suite (**41 / 41 passing**):
+
 - `test_image_processor.py`: In-memory WebP transcoding, dimension clamping, alpha flattening, MozJPEG 16383px fallback, color modes (Grayscale `L`, Bilevel `1`, Palette `P`, CMYK).
 - `test_chapter_namer.py`: Standard, decimal, prequel (`Chapter 0`), and Vietnamese chapter extraction (`Tập 2 Chương 45`).
 - `test_sync_pipeline.py`: S3 prefix isolation, PostgREST pagination, immutable CDN caching headers, Discord webhook payloads, `--health` diagnostics.

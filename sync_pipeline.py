@@ -50,7 +50,7 @@ R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
 R2_PUBLIC_URL = os.environ.get(
     "R2_PUBLIC_URL",
     "https://pub-006586cb2a0d4198bcd302b9b8f8ea45.r2.dev",
-)
+).rstrip("/")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DOWNLOADS_DIR = os.environ.get("DOWNLOADS_DIR", "downloads")
 RCLONE_REMOTE = os.environ.get("RCLONE_REMOTE", "gdrive:Comic")
@@ -61,12 +61,14 @@ SKIP_BACKUP = "--skip-backup" in sys.argv
 PRUNE_ENABLED = "--prune" in sys.argv
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+CBZ_EXTS = {".cbz"}
 MIME_MAP = {
     ".webp": "image/webp",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".gif": "image/gif",
+    ".cbz": "application/vnd.comicbook+zip",
 }
 
 
@@ -87,6 +89,12 @@ def slugify(text: str) -> str:
     return text.strip("-")
 
 
+def r2_asset_url(r2_prefix: str, local_file: Path) -> str:
+    """Build a cache-busted public URL for a local asset."""
+    version = f"{local_file.stat().st_size}-{local_file.stat().st_mtime_ns}"
+    return f"{R2_PUBLIC_URL}/{r2_prefix}/{local_file.name}?v={version}"
+
+
 def extract_chapter_number(folder_name: str) -> float | int | None:
     """Extract chapter number (int or float) from folder name ('Chapter 001' → 1, 'Chapter 012.5' → 12.5, 'Chapter 0' → 0)."""
     # Match explicit chapter keywords first to avoid capturing volume or season numbers (e.g. 'Vol. 1 Chapter 12')
@@ -105,8 +113,20 @@ def _natural_sort_key(p: Path):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", p.name)]
 
 
+def chapter_key(number: float | int) -> str:
+    """Return a stable JSON key for a chapter number."""
+    return str(number)
+
+
+def save_meta(meta_path: Path, meta: dict) -> None:
+    """Persist metadata atomically so sync state survives interruptions."""
+    temp_path = meta_path.with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(meta_path)
+
+
 def scan_downloads(downloads: Path) -> list[dict]:
-    """Scan downloads folder for comics and chapters with metadata."""
+    """Load comic manifests and materialize only chapters still pending sync."""
     comics = []
     for comic_dir in sorted(downloads.iterdir()):
         if not comic_dir.is_dir() or comic_dir.name.startswith("_"):
@@ -122,29 +142,79 @@ def scan_downloads(downloads: Path) -> list[dict]:
             except (json.JSONDecodeError, OSError):
                 pass
 
-        chapters = []
-        for ch_dir in sorted(comic_dir.iterdir()):
-            if not ch_dir.is_dir() or ch_dir.name.startswith("_"):
-                continue
-            ch_num = extract_chapter_number(ch_dir.name)
-            if ch_num is None:
-                continue
-            images = sorted(
-                (f for f in ch_dir.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS),
-                key=_natural_sort_key,
-            )
-            if not images:
-                continue
-            chapters.append(
-                {
-                    "dir": ch_dir,
-                    "number": ch_num,
-                    "title": ch_dir.name,
-                    "images": images,
-                }
-            )
+        chapters_by_number = {}
+        manifest = meta.get("chapters", {})
+        if isinstance(manifest, dict) and manifest:
+            for key, entry in manifest.items():
+                if not isinstance(entry, dict) or entry.get("synced") is True:
+                    continue
+                try:
+                    ch_num = float(entry.get("number", key))
+                    ch_num = int(ch_num) if ch_num.is_integer() else ch_num
+                except (TypeError, ValueError):
+                    continue
+                local_name = entry.get("local_name") or entry.get("title") or f"Chapter {ch_num}"
+                local_path = comic_dir / local_name
+                export_format = entry.get("format", "images")
+                if export_format == "cbz":
+                    if local_path.suffix.lower() != ".cbz":
+                        local_path = comic_dir / f"{local_name}.cbz"
+                    if not local_path.is_file():
+                        continue
+                    chapters_by_number[ch_num] = {
+                        "file": local_path,
+                        "number": ch_num,
+                        "title": entry.get("title", local_path.stem),
+                        "images": [],
+                        "format": "cbz",
+                        "sync_pending": True,
+                    }
+                else:
+                    if not local_path.is_dir():
+                        continue
+                    images = sorted(
+                        (f for f in local_path.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS),
+                        key=_natural_sort_key,
+                    )
+                    if images:
+                        chapters_by_number[ch_num] = {
+                            "dir": local_path,
+                            "number": ch_num,
+                            "title": entry.get("title", local_path.name),
+                            "images": images,
+                            "format": "images",
+                            "sync_pending": True,
+                        }
+        else:
+            # Legacy metadata is scanned once to bootstrap the manifest format.
+            for ch_dir in sorted(comic_dir.iterdir()):
+                if not ch_dir.is_dir() or ch_dir.name.startswith("_"):
+                    continue
+                ch_num = extract_chapter_number(ch_dir.name)
+                if ch_num is None:
+                    continue
+                images = sorted(
+                    (f for f in ch_dir.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS),
+                    key=_natural_sort_key,
+                )
+                if images:
+                    chapters_by_number[ch_num] = {
+                        "dir": ch_dir, "number": ch_num, "title": ch_dir.name,
+                        "images": images, "format": "images", "sync_pending": True,
+                    }
+            for cbz_file in sorted(comic_dir.iterdir(), key=_natural_sort_key):
+                if not cbz_file.is_file() or cbz_file.suffix.lower() not in CBZ_EXTS:
+                    continue
+                ch_num = extract_chapter_number(cbz_file.stem)
+                if ch_num is not None and ch_num not in chapters_by_number:
+                    chapters_by_number[ch_num] = {
+                        "file": cbz_file, "number": ch_num, "title": cbz_file.stem,
+                        "images": [], "format": "cbz", "sync_pending": True,
+                    }
 
-        if chapters:
+        chapters = sorted(chapters_by_number.values(), key=lambda chapter: chapter["number"])
+
+        if chapters or (isinstance(manifest, dict) and manifest):
             comics.append(
                 {
                     "title": title,
@@ -153,6 +223,8 @@ def scan_downloads(downloads: Path) -> list[dict]:
                     "category": meta.get("category", "Unknown"),
                     "description": meta.get("description", ""),
                     "url": meta.get("url", ""),
+                    "meta_path": meta_file,
+                    "meta": meta,
                     "dir": comic_dir,
                     "chapters": chapters,
                 }
@@ -490,7 +562,29 @@ def get_existing_r2_keys(client, prefix: str) -> set[str]:
     return keys
 
 
-def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
+def get_existing_r2_sizes(client, prefix: str) -> dict[str, int]:
+    """Fetch object sizes under a prefix so stale objects can be replaced."""
+    sizes = {}
+    continuation_token = None
+    query_prefix = prefix if prefix.endswith("/") else f"{prefix}/"
+    try:
+        while True:
+            kwargs = {"Bucket": R2_BUCKET, "Prefix": query_prefix}
+            if continuation_token:
+                kwargs["ContinuationToken"] = continuation_token
+            resp = client.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []):
+                sizes[obj["Key"]] = obj.get("Size", -1)
+            if resp.get("IsTruncated") and resp.get("NextContinuationToken"):
+                continuation_token = resp["NextContinuationToken"]
+            else:
+                break
+    except Exception as e:
+        print(f"  [Warning] Failed to inspect R2 objects for prefix '{query_prefix}': {e}", file=sys.stderr)
+    return sizes
+
+
+def upload_to_r2(local_dir: Path, r2_prefix: str, *, compare_existing: bool = True) -> bool:
     """Upload chapter images to R2 with thread-safe tqdm byte progress bar."""
     if DRY_RUN:
         print(f"  [DRY-RUN] Would upload {local_dir} to s3://{R2_BUCKET}/{r2_prefix}")
@@ -503,12 +597,27 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
             print(f"  [Warning] No images found in {local_dir} to upload.", file=sys.stderr)
             return False
 
-        existing_keys = get_existing_r2_keys(main_client, r2_prefix)
-        to_upload = [img for img in imgs if f"{r2_prefix}/{img.name}" not in existing_keys]
+        if compare_existing:
+            existing_sizes = get_existing_r2_sizes(main_client, r2_prefix)
+            to_upload = [
+                img for img in imgs
+                if existing_sizes.get(f"{r2_prefix}/{img.name}", -1) != img.stat().st_size
+            ]
+        else:
+            to_upload = imgs
 
         if not to_upload:
             print(f"  All {len(imgs)} images already in R2 (skipped)")
             return True
+
+        stale_count = 0
+        if compare_existing:
+            stale_count = sum(
+                1 for img in to_upload
+                if f"{r2_prefix}/{img.name}" in existing_sizes
+            )
+        if stale_count:
+            print(f"  Replacing {stale_count} stale R2 image(s)")
 
         total_bytes = sum(p.stat().st_size for p in to_upload)
         pbar_lock = threading.Lock()
@@ -553,6 +662,40 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
     return True
 
 
+def upload_cbz_to_r2(cbz_file: Path, r2_prefix: str, *, compare_existing: bool = True) -> bool:
+    """Upload a CBZ archive to R2 with immutable caching headers."""
+    key = f"{r2_prefix}/{cbz_file.name}"
+    if DRY_RUN:
+        print(f"  [DRY-RUN] Would upload {cbz_file} to s3://{R2_BUCKET}/{key}")
+        return True
+
+    try:
+        client = _get_r2_client()
+        if compare_existing:
+            existing_sizes = get_existing_r2_sizes(client, r2_prefix)
+        else:
+            existing_sizes = {}
+        if compare_existing and existing_sizes.get(key) == cbz_file.stat().st_size:
+            print(f"  CBZ already in R2 (skipped): {cbz_file.name}")
+            return True
+
+        client.upload_file(
+            str(cbz_file),
+            R2_BUCKET,
+            key,
+            ExtraArgs={
+                "ContentType": MIME_MAP[".cbz"],
+                "CacheControl": "public, max-age=31536000, immutable",
+                "ContentDisposition": "inline",
+            },
+        )
+        print(f"  ✓ Uploaded CBZ: {cbz_file.name}")
+        return True
+    except Exception as e:
+        print(f"  ERROR uploading CBZ: {e}", file=sys.stderr)
+        return False
+
+
 # ── Backup & Prune ───────────────────────────────────────────────────
 
 
@@ -591,7 +734,7 @@ def backup_to_drive(downloads_dir: Path) -> bool:
 
 
 def prune_local_chapters(synced_chapters: list[dict]) -> None:
-    """Prune local chapter directories after confirmed R2 and Drive sync."""
+    """Prune local chapter directories or CBZ files after confirmed sync."""
     if not PRUNE_ENABLED:
         return
 
@@ -600,21 +743,30 @@ def prune_local_chapters(synced_chapters: list[dict]) -> None:
     freed_bytes = 0
 
     for item in synced_chapters:
-        ch_dir = item.get("dir")
-        if not ch_dir or not ch_dir.exists() or not ch_dir.is_dir():
+        local_path = item.get("dir")
+        if not local_path or not local_path.exists():
             continue
 
-        dir_size = sum(f.stat().st_size for f in ch_dir.iterdir() if f.is_file())
-        file_count = len([f for f in ch_dir.iterdir() if f.is_file()])
+        if local_path.is_file():
+            dir_size = local_path.stat().st_size
+            file_count = 1
+        elif local_path.is_dir():
+            dir_size = sum(f.stat().st_size for f in local_path.iterdir() if f.is_file())
+            file_count = len([f for f in local_path.iterdir() if f.is_file()])
+        else:
+            continue
 
         if DRY_RUN:
-            print(f"  [DRY-RUN] Would prune: {ch_dir.parent.name}/{ch_dir.name} ({file_count} files, {dir_size / (1024 * 1024):.1f} MB)")
+            print(f"  [DRY-RUN] Would prune: {local_path.parent.name}/{local_path.name} ({file_count} files, {dir_size / (1024 * 1024):.1f} MB)")
         else:
             try:
-                shutil.rmtree(ch_dir)
-                print(f"  ✓ Pruned: {ch_dir.parent.name}/{ch_dir.name} ({file_count} files, {dir_size / (1024 * 1024):.1f} MB)")
+                if local_path.is_file():
+                    local_path.unlink()
+                else:
+                    shutil.rmtree(local_path)
+                print(f"  ✓ Pruned: {local_path.parent.name}/{local_path.name} ({file_count} files, {dir_size / (1024 * 1024):.1f} MB)")
             except Exception as e:
-                print(f"  [Warning] Failed to prune {ch_dir}: {e}", file=sys.stderr)
+                print(f"  [Warning] Failed to prune {local_path}: {e}", file=sys.stderr)
                 continue
 
         pruned_count += 1
@@ -770,7 +922,13 @@ def main() -> None:
     if DRY_RUN:
         print("=== DRY RUN MODE ===\n")
 
+    print(f"Scanning downloads: {downloads.resolve()}...", flush=True)
     comics = scan_downloads(downloads)
+    print(
+        f"Scan complete: {len(comics)} comic(s), "
+        f"{sum(len(comic['chapters']) for comic in comics)} chapter(s) found.",
+        flush=True,
+    )
     if not comics:
         print("No comics found in downloads/")
         sys.exit(0)
@@ -805,6 +963,8 @@ def main() -> None:
             category = comic["category"]
             description = comic["description"]
             url = comic["url"]
+            meta = comic["meta"]
+            meta_path = comic["meta_path"]
 
             if url and not primary_source_id and sb_enabled():
                 primary_source_id = get_or_create_crawler_source(url)
@@ -816,8 +976,13 @@ def main() -> None:
             if category and category != "Unknown":
                 print(f"  Category: {category}")
 
-            first_ch = comic["chapters"][0]
-            cover_url = f"{R2_PUBLIC_URL}/chapters/{slug}/ch_{first_ch['number']}/{first_ch['images'][0].name}"
+            cover_url = None
+            if comic["chapters"] and comic["chapters"][0]["format"] == "images":
+                first_ch = comic["chapters"][0]
+                cover_url = r2_asset_url(
+                    f"chapters/{slug}/ch_{first_ch['number']}",
+                    first_ch["images"][0],
+                )
 
             story_id = (
                 get_or_create_story(title, slug, cover_url, author, category, description)
@@ -828,46 +993,64 @@ def main() -> None:
                 print("  ERROR: Could not get/create story")
                 continue
 
-            existing_chapters = get_existing_chapter_numbers(story_id) if (sb_enabled() and not DRY_RUN) else set()
-
             for ch in comic["chapters"]:
+                if not ch.get("sync_pending", True):
+                    continue
                 items_seen += 1
                 ch_num = ch["number"]
-
-                if ch_num in existing_chapters:
-                    continue
-
                 r2_prefix = f"chapters/{slug}/ch_{ch_num}"
 
-                print(f"  Uploading ch {ch_num} ({len(ch['images'])} images)...")
-                if not upload_to_r2(ch["dir"], r2_prefix):
+                if ch["format"] == "cbz":
+                    print(f"  Uploading ch {ch_num} ({ch['file'].name})...")
+                    upload_ok = upload_cbz_to_r2(ch["file"], r2_prefix, compare_existing=False)
+                else:
+                    print(f"  Uploading ch {ch_num} ({len(ch['images'])} images)...")
+                    upload_ok = upload_to_r2(ch["dir"], r2_prefix, compare_existing=False)
+
+                if not upload_ok:
                     print(f"  ERROR: Upload failed for ch {ch_num}")
                     continue
 
-                content = json.dumps([f"{R2_PUBLIC_URL}/{r2_prefix}/{img.name}" for img in ch["images"]])
+                if ch["format"] == "cbz":
+                    content = json.dumps([r2_asset_url(r2_prefix, ch["file"])])
+                else:
+                    content = json.dumps([r2_asset_url(r2_prefix, img) for img in ch["images"]])
+
+                chapter_payload = {
+                    "story_id": story_id,
+                    "chapter_number": ch_num,
+                    "title": ch["title"],
+                    "content": content,
+                    "status": "published",
+                    "published_at": datetime.now(timezone.utc).isoformat(),
+                }
 
                 if sb_enabled() and not DRY_RUN:
                     try:
-                        supabase_post(
-                            "chapters",
-                            {
-                                "story_id": story_id,
-                                "chapter_number": ch_num,
-                                "title": ch["title"],
-                                "content": content,
-                                "status": "published",
-                                "published_at": datetime.now(timezone.utc).isoformat(),
-                            },
-                        )
+                        supabase_post("chapters", chapter_payload)
                         items_created += 1
                         print(f"  ✓ Ch {ch_num} synced to Supabase")
                     except requests.HTTPError as e:
-                        if e.response is None or e.response.status_code != 409:
+                        if e.response is not None and e.response.status_code == 409:
+                            supabase_patch(
+                                "chapters",
+                                {
+                                    "story_id": f"eq.{story_id}",
+                                    "chapter_number": f"eq.{ch_num}",
+                                },
+                                chapter_payload,
+                            )
+                            items_updated += 1
+                            print(f"  ✓ Ch {ch_num} updated in Supabase")
+                        else:
                             print(f"  ERROR inserting ch {ch_num}: {e}", file=sys.stderr)
                             continue
                 else:
                     items_created += 1
-                    print(f"  [DRY-RUN] Would insert ch {ch_num} with {len(ch['images'])} images")
+                    if ch["format"] == "cbz":
+                        print(f"  [DRY-RUN] Would insert ch {ch_num} with CBZ URL")
+                    else:
+                        print(f"  [DRY-RUN] Would insert ch {ch_num} with {len(ch['images'])} images")
 
                 item_info = {
                     "comic": title,
@@ -875,10 +1058,21 @@ def main() -> None:
                     "category": category,
                     "chapter": ch["title"],
                     "ch_num": ch_num,
-                    "dir": ch["dir"],
+                    "dir": ch["dir"] if ch["format"] == "images" else ch["file"],
                 }
                 summary.append(item_info)
                 synced_for_prune.append(item_info)
+                chapters_manifest = meta.setdefault("chapters", {})
+                if not isinstance(chapters_manifest, dict):
+                    chapters_manifest = {}
+                    meta["chapters"] = chapters_manifest
+                chapters_manifest[chapter_key(ch_num)] = {
+                    "number": ch_num,
+                    "title": ch["title"],
+                    "url": chapters_manifest.get(chapter_key(ch_num), {}).get("url", ""),
+                    "synced": True,
+                }
+                save_meta(meta_path, meta)
 
         # Backup & Prune
         drive_ok = backup_to_drive(downloads)

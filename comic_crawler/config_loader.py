@@ -31,8 +31,11 @@ class ConfigLoader:
 
         # Search for exact or partial domain match in config
         for site in self.config.get("sites", []):
-            site_domain = site.get("domain", "").lower()
-            if site_domain and (site_domain in domain or domain in site_domain):
+            configured_domains = site.get("domains", site.get("domain", ""))
+            if isinstance(configured_domains, str):
+                configured_domains = [configured_domains]
+            configured_domains = [item.lower() for item in configured_domains]
+            if any(item in domain or domain in item for item in configured_domains):
                 # Merge default headers with site specific headers
                 merged_headers = default_headers.copy()
                 merged_headers.update(site.get("headers", {}))

@@ -98,6 +98,30 @@
       }
     },
     {
+      "name": "TruyenQQ",
+      "domains": [
+        "truyenqq.com",
+        "truyenqq.com.vn",
+        "truyenqqko.com",
+        "truyenqqto.com",
+        "truyenqqvip.com"
+      ],
+      "chapter_order": "desc",
+      "headers": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://truyenqqko.com/"
+      },
+      "selectors": {
+        "comic_title": "h1[itemprop='name']",
+        "author": "ul.list-info li:-soup-contains('Tác giả')",
+        "category": "ul.list-info li:-soup-contains('Thể loại')",
+        "description": "div.story-detail-info",
+        "chapter_list": "div.works-chapter-list div.works-chapter-item a, div.chapter-list a, #chapter-list a",
+        "page_images": "div.page-chapter img, div.reading-list img, div.reading-content img",
+        "image_url_attributes": ["data-src", "data-original", "src"]
+      }
+    },
+    {
       "name": "FlameComics",
       "domain": "flamecomics",
       "headers": {

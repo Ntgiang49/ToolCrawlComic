@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from typing import List, Dict, Any, Tuple
 
 import requests
+import cloudscraper  # Đã thêm thư viện vượt Cloudflare
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
@@ -41,7 +42,16 @@ class ComicCrawler:
     def __init__(self, config_path: str = "config.json", num_threads: int = 4):
         self.config_loader = ConfigLoader(config_path)
         self.num_threads = num_threads
-        self.session = requests.Session()
+        
+        # Thay thế requests.Session() bằng cloudscraper để vượt qua Anti-bot
+        self.session = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
+        
         pool_size = max(10, num_threads * 2)
         adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size)
         self.session.mount("http://", adapter)
@@ -59,16 +69,18 @@ class ComicCrawler:
 
     def _fetch_html(self, url: str, headers: Dict[str, str]) -> str:
         """Fetches HTML content with automatic retries."""
-        for attempt in range(3):
+        last_error = None
+        for attempt in range(5):
             try:
                 response = self.session.get(url, headers=headers, timeout=15)
                 response.raise_for_status()
                 return response.text
             except requests.RequestException as e:
-                if attempt == 2:
-                    raise RuntimeError(f"Failed to fetch {url}: {e}")
-                time.sleep(1.5 * (attempt + 1))
-        return ""
+                last_error = e
+                if attempt == 4:
+                    break
+                time.sleep(2 ** attempt)
+        raise RuntimeError(f"Failed to fetch {url} after 5 attempts: {last_error}")
 
     def parse_comic_info(self, comic_url: str) -> Dict[str, Any]:
         """Fetches and parses main comic landing page metadata and chapter list."""
@@ -222,6 +234,29 @@ class ComicCrawler:
                 time.sleep(1)
         return False
 
+    def _download_image_with_error(
+        self, img_url: str, save_path: str, headers: Dict[str, str]
+    ) -> Tuple[bool, str]:
+        """Downloads an image and preserves a useful failure reason for callers."""
+        for attempt in range(3):
+            try:
+                res = self.session.get(img_url, headers=headers, timeout=15)
+                res.raise_for_status()
+                if not res.content:
+                    raise RuntimeError("empty response body")
+
+                processed = ImageProcessor.process_image(res.content)
+                base, _ = os.path.splitext(save_path)
+                final_save_path = f"{base}.{processed.format}"
+                with open(final_save_path, "wb") as f:
+                    f.write(processed.buffer)
+                return True, ""
+            except Exception as exc:
+                if attempt == 2:
+                    return False, str(exc)
+                time.sleep(1)
+        return False, "unknown download error"
+
     def download_chapter(
         self,
         chapter_title: str,
@@ -244,15 +279,20 @@ class ComicCrawler:
         os.makedirs(temp_dir, exist_ok=True)
 
         headers = site_config["headers"].copy()
+        # Image CDNs commonly reject hotlink requests without the reader page as referer.
+        headers["Referer"] = chapter_url
 
         with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
             tasks = []
             for idx, img_url in enumerate(image_urls):
                 save_path = os.path.join(temp_dir, f"{idx + 1:03d}.webp")
-                tasks.append(executor.submit(self.download_image, img_url, save_path, headers))
+                tasks.append(executor.submit(self._download_image_with_error, img_url, save_path, headers))
 
-            for _ in tqdm(as_completed(tasks), total=len(tasks), desc=f"Downloading {ch_name[:20]}", leave=False):
-                pass
+            failures = []
+            for task in tqdm(as_completed(tasks), total=len(tasks), desc=f"Downloading {ch_name[:20]}", leave=False):
+                success, error = task.result()
+                if not success and error:
+                    failures.append(error)
 
         valid_paths = [
             os.path.join(temp_dir, f)
@@ -260,7 +300,8 @@ class ComicCrawler:
             if os.path.isfile(os.path.join(temp_dir, f)) and os.path.getsize(os.path.join(temp_dir, f)) > 0
         ]
         if not valid_paths:
-            return False, f"Failed to download images for {chapter_title}"
+            reason = failures[0] if failures else "unknown download error"
+            return False, f"Failed to download images for {chapter_title}: {reason}"
 
         try:
             if export_format in ("cbz", "pdf"):
