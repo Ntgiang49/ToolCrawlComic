@@ -4,15 +4,17 @@ import os
 import io
 import json
 
-# Force UTF-8 encoding for stdout/stderr to support Vietnamese & unicode comic titles safely
-if sys.stdout and hasattr(sys.stdout, 'buffer'):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-if sys.stderr and hasattr(sys.stderr, 'buffer'):
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+# Force UTF-8 encoding for direct CLI runs without replacing streams on import.
+if __name__ == "__main__":
+    if sys.stdout and hasattr(sys.stdout, 'buffer'):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    if sys.stderr and hasattr(sys.stderr, 'buffer'):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 from comic_crawler.core import ComicCrawler
 from comic_crawler.library import LibraryManager
 from comic_crawler.exporter import ComicExporter
+from comic_crawler.chapter_namer import ChapterNamer
 
 BANNER = r"""
 =====================================================
@@ -25,6 +27,40 @@ BANNER = r"""
                      COMIC CRAWLER EASY v1.4
 =====================================================
 """
+
+def chapter_manifest_key(chapter_title: str, chapter_url: str = "") -> str:
+    """Return a stable manifest key for a chapter number, including decimals."""
+    number = ChapterNamer.extract_number(chapter_title)
+    if number is not None:
+        return str(int(number) if number.is_integer() else number)
+    return chapter_url.strip()
+
+
+def load_chapter_manifest(meta_path: str) -> dict:
+    """Load chapter crawl state from meta.json, including older list manifests."""
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    manifest = meta.get("chapters", {}) if isinstance(meta, dict) else {}
+    if isinstance(manifest, list):
+        return {
+            chapter_manifest_key(str(item.get("number", "")), item.get("url", "")): item
+            for item in manifest
+            if isinstance(item, dict) and item.get("number") is not None
+        }
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def save_meta(meta_path: str, meta: dict) -> None:
+    """Persist metadata atomically so crawl state survives interruptions."""
+    temp_path = meta_path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, meta_path)
+
 
 def sync_single_comic(crawler: ComicCrawler, library: LibraryManager, url: str, export_format: str, output_base: str, start: int = None, end: int = None):
     print(f"\n[Parsing] Fetching info from: {url}")
@@ -39,14 +75,17 @@ def sync_single_comic(crawler: ComicCrawler, library: LibraryManager, url: str, 
     out_dir = os.path.join(output_base, title)
     os.makedirs(out_dir, exist_ok=True)
 
-    with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump({
-            "url": url,
-            "title": title,
-            "author": info.get("author", "Unknown"),
-            "category": info.get("category", "Unknown"),
-            "description": info.get("description", "")
-        }, f, ensure_ascii=False, indent=2)
+    meta_path = os.path.join(out_dir, "meta.json")
+    manifest = load_chapter_manifest(meta_path)
+    meta = {
+        "url": url,
+        "title": title,
+        "author": info.get("author", "Unknown"),
+        "category": info.get("category", "Unknown"),
+        "description": info.get("description", ""),
+        "chapters": manifest,
+    }
+    save_meta(meta_path, meta)
 
     # Save/Update comic in library.json tracker
     library.add_or_update_comic(
@@ -59,8 +98,21 @@ def sync_single_comic(crawler: ComicCrawler, library: LibraryManager, url: str, 
 
     if not chapters:
         print("[Notice] Could not auto-detect chapter list. Attempting single page download...")
-        success, msg = crawler.download_chapter("Chapter 001", url, info["site_config"], out_dir, export_format)
+        ch_title = "Chapter 001"
+        ch_key = chapter_manifest_key(ch_title, url)
+        manifest_entry = manifest.get(ch_key, {})
+        local_path = os.path.join(out_dir, manifest_entry.get("local_name", ch_title))
+        if manifest_entry.get("synced") is True or os.path.exists(local_path):
+            print(f"  -> [Skipped] {ch_title} (Recorded in meta.json)")
+            return
+        success, msg = crawler.download_chapter(ch_title, url, info["site_config"], out_dir, export_format)
         print(f"  -> {msg}")
+        if success:
+            manifest[ch_key] = {
+                "number": 1, "title": ch_title, "url": url,
+                "local_name": ch_title, "format": export_format, "synced": False,
+            }
+            save_meta(meta_path, meta)
         return
 
     # Filter chapter range if specified
@@ -76,6 +128,14 @@ def sync_single_comic(crawler: ComicCrawler, library: LibraryManager, url: str, 
     for idx, ch in enumerate(target_chapters, 1):
         ch_title = ch["title"]
         ch_url = ch["url"]
+
+        ch_key = chapter_manifest_key(ch_title, ch_url)
+        manifest_entry = manifest.get(ch_key, {})
+        local_path = os.path.join(out_dir, manifest_entry.get("local_name", ch_title))
+        if manifest_entry.get("synced") is True or os.path.exists(local_path):
+            skipped_count += 1
+            print(f"  [{idx}/{len(target_chapters)}] [Skipped] {ch_title} (Recorded in meta.json)")
+            continue
         
         success, msg = crawler.download_chapter(ch_title, ch_url, info["site_config"], out_dir, export_format)
         if success:
@@ -84,6 +144,16 @@ def sync_single_comic(crawler: ComicCrawler, library: LibraryManager, url: str, 
             else:
                 downloaded_count += 1
                 print(f"  [{idx}/{len(target_chapters)}] {msg}")
+            chapter_number = ChapterNamer.extract_number(ch_title)
+            manifest[ch_key] = {
+                "number": int(chapter_number) if chapter_number is not None and chapter_number.is_integer() else chapter_number,
+                "title": ch_title,
+                "url": ch_url,
+                "local_name": ch_title,
+                "format": export_format,
+                "synced": False,
+            }
+            save_meta(meta_path, meta)
         else:
             print(f"  [{idx}/{len(target_chapters)}] [Failed] {ch_title}: {msg}")
 

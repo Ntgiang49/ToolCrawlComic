@@ -4,10 +4,12 @@
 import io
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -50,10 +52,13 @@ R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
 R2_PUBLIC_URL = os.environ.get(
     "R2_PUBLIC_URL",
     "https://pub-006586cb2a0d4198bcd302b9b8f8ea45.r2.dev",
-)
+).rstrip("/")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DOWNLOADS_DIR = os.environ.get("DOWNLOADS_DIR", "downloads")
 RCLONE_REMOTE = os.environ.get("RCLONE_REMOTE", "gdrive:Comic")
+CHAPTER_BATCH_SIZE = int(os.environ.get("CHAPTER_BATCH_SIZE", "10"))
+R2_MAX_WORKERS = int(os.environ.get("R2_MAX_WORKERS", "4"))
+SUPABASE_MAX_WORKERS = int(os.environ.get("SUPABASE_MAX_WORKERS", "2"))
 
 # CLI flags
 DRY_RUN = "--dry-run" in sys.argv
@@ -61,12 +66,14 @@ SKIP_BACKUP = "--skip-backup" in sys.argv
 PRUNE_ENABLED = "--prune" in sys.argv
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+CBZ_EXTS = {".cbz"}
 MIME_MAP = {
     ".webp": "image/webp",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".gif": "image/gif",
+    ".cbz": "application/vnd.comicbook+zip",
 }
 
 
@@ -87,6 +94,12 @@ def slugify(text: str) -> str:
     return text.strip("-")
 
 
+def r2_asset_url(r2_prefix: str, local_file: Path) -> str:
+    """Build a cache-busted public URL for a local asset."""
+    version = f"{local_file.stat().st_size}-{local_file.stat().st_mtime_ns}"
+    return f"{R2_PUBLIC_URL}/{r2_prefix}/{local_file.name}?v={version}"
+
+
 def extract_chapter_number(folder_name: str) -> float | int | None:
     """Extract chapter number (int or float) from folder name ('Chapter 001' → 1, 'Chapter 012.5' → 12.5, 'Chapter 0' → 0)."""
     # Match explicit chapter keywords first to avoid capturing volume or season numbers (e.g. 'Vol. 1 Chapter 12')
@@ -105,8 +118,68 @@ def _natural_sort_key(p: Path):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", p.name)]
 
 
+def chunk_chapters(chapters: list, batch_size: int | None = None) -> list[list]:
+    """Split a chapter list into configurable batches, defaulting to 10."""
+    size = int(batch_size or CHAPTER_BATCH_SIZE)
+    if size <= 0:
+        size = 10
+    return [chapters[i:i + size] for i in range(0, len(chapters), size)]
+
+
+def _retryable_http_status(exc: Exception) -> bool:
+    """Return True for HTTP 429 / 5xx style errors that should be retried with backoff."""
+    status = None
+    response = getattr(exc, "response", None)
+    if response is not None:
+        status = getattr(response, "status_code", None)
+    elif isinstance(exc, requests.HTTPError) and exc.response is not None:
+        status = exc.response.status_code
+
+    if status is not None:
+        return status == 429 or 500 <= int(status) <= 599
+
+    if isinstance(exc, Exception):
+        error_name = str(exc).upper()
+        if any(token in error_name for token in ("429", "TOOMANYREQUESTS", "RATE_LIMIT", "RATE-LIMIT", "THROTTL")):
+            return True
+        if any(token in error_name for token in ("500", "502", "503", "504", "SERVICE UNAVAILABLE", "INTERNALERROR", "TIMEOUT")):
+            return True
+
+    return False
+
+
+def with_retry(operation, label: str, max_retries: int = 3, base_delay: float = 1.0):
+    """Invoke an operation with exponential backoff and jitter for HTTP 429/5xx responses."""
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            last_exc = exc
+            if not _retryable_http_status(exc) or attempt >= max_retries:
+                raise
+            delay = base_delay * (2 ** attempt) + random.uniform(0.0, 0.5)
+            print(f"  [Retry] {label} failed ({type(exc).__name__}: {exc}). Retrying in {delay:.2f}s ({attempt + 1}/{max_retries})", file=sys.stderr)
+            time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Retry loop for {label} exited without an exception")
+
+
+def chapter_key(number: float | int) -> str:
+    """Return a stable JSON key for a chapter number."""
+    return str(number)
+
+
+def save_meta(meta_path: Path, meta: dict) -> None:
+    """Persist metadata atomically so sync state survives interruptions."""
+    temp_path = meta_path.with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(meta_path)
+
+
 def scan_downloads(downloads: Path) -> list[dict]:
-    """Scan downloads folder for comics and chapters with metadata."""
+    """Load comic manifests and materialize only chapters still pending sync."""
     comics = []
     for comic_dir in sorted(downloads.iterdir()):
         if not comic_dir.is_dir() or comic_dir.name.startswith("_"):
@@ -122,29 +195,79 @@ def scan_downloads(downloads: Path) -> list[dict]:
             except (json.JSONDecodeError, OSError):
                 pass
 
-        chapters = []
-        for ch_dir in sorted(comic_dir.iterdir()):
-            if not ch_dir.is_dir() or ch_dir.name.startswith("_"):
-                continue
-            ch_num = extract_chapter_number(ch_dir.name)
-            if ch_num is None:
-                continue
-            images = sorted(
-                (f for f in ch_dir.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS),
-                key=_natural_sort_key,
-            )
-            if not images:
-                continue
-            chapters.append(
-                {
-                    "dir": ch_dir,
-                    "number": ch_num,
-                    "title": ch_dir.name,
-                    "images": images,
-                }
-            )
+        chapters_by_number = {}
+        manifest = meta.get("chapters", {})
+        if isinstance(manifest, dict) and manifest:
+            for key, entry in manifest.items():
+                if not isinstance(entry, dict) or entry.get("synced") is True:
+                    continue
+                try:
+                    ch_num = float(entry.get("number", key))
+                    ch_num = int(ch_num) if ch_num.is_integer() else ch_num
+                except (TypeError, ValueError):
+                    continue
+                local_name = entry.get("local_name") or entry.get("title") or f"Chapter {ch_num}"
+                local_path = comic_dir / local_name
+                export_format = entry.get("format", "images")
+                if export_format == "cbz":
+                    if local_path.suffix.lower() != ".cbz":
+                        local_path = comic_dir / f"{local_name}.cbz"
+                    if not local_path.is_file():
+                        continue
+                    chapters_by_number[ch_num] = {
+                        "file": local_path,
+                        "number": ch_num,
+                        "title": entry.get("title", local_path.stem),
+                        "images": [],
+                        "format": "cbz",
+                        "sync_pending": True,
+                    }
+                else:
+                    if not local_path.is_dir():
+                        continue
+                    images = sorted(
+                        (f for f in local_path.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS),
+                        key=_natural_sort_key,
+                    )
+                    if images:
+                        chapters_by_number[ch_num] = {
+                            "dir": local_path,
+                            "number": ch_num,
+                            "title": entry.get("title", local_path.name),
+                            "images": images,
+                            "format": "images",
+                            "sync_pending": True,
+                        }
+        else:
+            # Legacy metadata is scanned once to bootstrap the manifest format.
+            for ch_dir in sorted(comic_dir.iterdir()):
+                if not ch_dir.is_dir() or ch_dir.name.startswith("_"):
+                    continue
+                ch_num = extract_chapter_number(ch_dir.name)
+                if ch_num is None:
+                    continue
+                images = sorted(
+                    (f for f in ch_dir.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS),
+                    key=_natural_sort_key,
+                )
+                if images:
+                    chapters_by_number[ch_num] = {
+                        "dir": ch_dir, "number": ch_num, "title": ch_dir.name,
+                        "images": images, "format": "images", "sync_pending": True,
+                    }
+            for cbz_file in sorted(comic_dir.iterdir(), key=_natural_sort_key):
+                if not cbz_file.is_file() or cbz_file.suffix.lower() not in CBZ_EXTS:
+                    continue
+                ch_num = extract_chapter_number(cbz_file.stem)
+                if ch_num is not None and ch_num not in chapters_by_number:
+                    chapters_by_number[ch_num] = {
+                        "file": cbz_file, "number": ch_num, "title": cbz_file.stem,
+                        "images": [], "format": "cbz", "sync_pending": True,
+                    }
 
-        if chapters:
+        chapters = sorted(chapters_by_number.values(), key=lambda chapter: chapter["number"])
+
+        if chapters or (isinstance(manifest, dict) and manifest):
             comics.append(
                 {
                     "title": title,
@@ -153,6 +276,8 @@ def scan_downloads(downloads: Path) -> list[dict]:
                     "category": meta.get("category", "Unknown"),
                     "description": meta.get("description", ""),
                     "url": meta.get("url", ""),
+                    "meta_path": meta_file,
+                    "meta": meta,
                     "dir": comic_dir,
                     "chapters": chapters,
                 }
@@ -490,7 +615,54 @@ def get_existing_r2_keys(client, prefix: str) -> set[str]:
     return keys
 
 
-def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
+def get_existing_r2_sizes(client, prefix: str) -> dict[str, int]:
+    """Fetch object sizes under a prefix so stale objects can be replaced."""
+    sizes = {}
+    continuation_token = None
+    query_prefix = prefix if prefix.endswith("/") else f"{prefix}/"
+    try:
+        while True:
+            kwargs = {"Bucket": R2_BUCKET, "Prefix": query_prefix}
+            if continuation_token:
+                kwargs["ContinuationToken"] = continuation_token
+            resp = client.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []):
+                sizes[obj["Key"]] = obj.get("Size", -1)
+            if resp.get("IsTruncated") and resp.get("NextContinuationToken"):
+                continuation_token = resp["NextContinuationToken"]
+            else:
+                break
+    except Exception as e:
+        print(f"  [Warning] Failed to inspect R2 objects for prefix '{query_prefix}': {e}", file=sys.stderr)
+    return sizes
+
+
+def chapter_already_on_r2(chapter: dict, slug: str) -> bool:
+    """Check whether the required chapter objects already exist in R2 using manifest and key prefix data."""
+    if not chapter:
+        return False
+
+    client = _get_r2_client()
+    r2_prefix = f"chapters/{slug}/ch_{chapter['number']}"
+    if chapter.get("format") == "cbz":
+        if "file" not in chapter:
+            return False
+        return f"{r2_prefix}/{chapter['file'].name}" in get_existing_r2_keys(client, r2_prefix)
+
+    if "dir" not in chapter:
+        return False
+    expected = {
+        f"{r2_prefix}/{p.name}"
+        for p in chapter["dir"].iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    }
+    if not expected:
+        return False
+    existing = get_existing_r2_keys(client, r2_prefix)
+    return expected.issubset(existing)
+
+
+def upload_to_r2(local_dir: Path, r2_prefix: str, *, compare_existing: bool = True) -> bool:
     """Upload chapter images to R2 with thread-safe tqdm byte progress bar."""
     if DRY_RUN:
         print(f"  [DRY-RUN] Would upload {local_dir} to s3://{R2_BUCKET}/{r2_prefix}")
@@ -503,12 +675,27 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
             print(f"  [Warning] No images found in {local_dir} to upload.", file=sys.stderr)
             return False
 
-        existing_keys = get_existing_r2_keys(main_client, r2_prefix)
-        to_upload = [img for img in imgs if f"{r2_prefix}/{img.name}" not in existing_keys]
+        if compare_existing:
+            existing_sizes = get_existing_r2_sizes(main_client, r2_prefix)
+            to_upload = [
+                img for img in imgs
+                if existing_sizes.get(f"{r2_prefix}/{img.name}", -1) != img.stat().st_size
+            ]
+        else:
+            to_upload = imgs
 
         if not to_upload:
             print(f"  All {len(imgs)} images already in R2 (skipped)")
             return True
+
+        stale_count = 0
+        if compare_existing:
+            stale_count = sum(
+                1 for img in to_upload
+                if f"{r2_prefix}/{img.name}" in existing_sizes
+            )
+        if stale_count:
+            print(f"  Replacing {stale_count} stale R2 image(s)")
 
         total_bytes = sum(p.stat().st_size for p in to_upload)
         pbar_lock = threading.Lock()
@@ -535,15 +722,18 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
                     "ContentDisposition": "inline",
                 }
 
-                thread_client.upload_file(
-                    str(img),
-                    R2_BUCKET,
-                    key,
-                    ExtraArgs=extra_args,
-                    Callback=_safe_update,
-                )
+                def _upload_once() -> None:
+                    thread_client.upload_file(
+                        str(img),
+                        R2_BUCKET,
+                        key,
+                        ExtraArgs=extra_args,
+                        Callback=_safe_update,
+                    )
 
-            with ThreadPoolExecutor(max_workers=8) as ex:
+                with_retry(_upload_once, f"upload {key} to R2", max_retries=3, base_delay=1.0)
+
+            with ThreadPoolExecutor(max_workers=R2_MAX_WORKERS) as ex:
                 list(ex.map(_upload, to_upload))
 
         print(f"  ✓ Uploaded {len(to_upload)}/{len(imgs)} image(s) ({total_bytes / (1024 * 1024):.1f} MB)")
@@ -551,6 +741,43 @@ def upload_to_r2(local_dir: Path, r2_prefix: str) -> bool:
         print(f"  ERROR uploading: {e}", file=sys.stderr)
         return False
     return True
+
+
+def upload_cbz_to_r2(cbz_file: Path, r2_prefix: str, *, compare_existing: bool = True) -> bool:
+    """Upload a CBZ archive to R2 with immutable caching headers."""
+    key = f"{r2_prefix}/{cbz_file.name}"
+    if DRY_RUN:
+        print(f"  [DRY-RUN] Would upload {cbz_file} to s3://{R2_BUCKET}/{key}")
+        return True
+
+    try:
+        client = _get_r2_client()
+        if compare_existing:
+            existing_sizes = get_existing_r2_sizes(client, r2_prefix)
+        else:
+            existing_sizes = {}
+        if compare_existing and existing_sizes.get(key) == cbz_file.stat().st_size:
+            print(f"  CBZ already in R2 (skipped): {cbz_file.name}")
+            return True
+
+        def _upload_once() -> None:
+            client.upload_file(
+                str(cbz_file),
+                R2_BUCKET,
+                key,
+                ExtraArgs={
+                    "ContentType": MIME_MAP[".cbz"],
+                    "CacheControl": "public, max-age=31536000, immutable",
+                    "ContentDisposition": "inline",
+                },
+            )
+
+        with_retry(_upload_once, f"upload {key} to R2", max_retries=3, base_delay=1.0)
+        print(f"  ✓ Uploaded CBZ: {cbz_file.name}")
+        return True
+    except Exception as e:
+        print(f"  ERROR uploading CBZ: {e}", file=sys.stderr)
+        return False
 
 
 # ── Backup & Prune ───────────────────────────────────────────────────
@@ -591,7 +818,7 @@ def backup_to_drive(downloads_dir: Path) -> bool:
 
 
 def prune_local_chapters(synced_chapters: list[dict]) -> None:
-    """Prune local chapter directories after confirmed R2 and Drive sync."""
+    """Prune local chapter directories or CBZ files after confirmed sync."""
     if not PRUNE_ENABLED:
         return
 
@@ -600,21 +827,30 @@ def prune_local_chapters(synced_chapters: list[dict]) -> None:
     freed_bytes = 0
 
     for item in synced_chapters:
-        ch_dir = item.get("dir")
-        if not ch_dir or not ch_dir.exists() or not ch_dir.is_dir():
+        local_path = item.get("dir")
+        if not local_path or not local_path.exists():
             continue
 
-        dir_size = sum(f.stat().st_size for f in ch_dir.iterdir() if f.is_file())
-        file_count = len([f for f in ch_dir.iterdir() if f.is_file()])
+        if local_path.is_file():
+            dir_size = local_path.stat().st_size
+            file_count = 1
+        elif local_path.is_dir():
+            dir_size = sum(f.stat().st_size for f in local_path.iterdir() if f.is_file())
+            file_count = len([f for f in local_path.iterdir() if f.is_file()])
+        else:
+            continue
 
         if DRY_RUN:
-            print(f"  [DRY-RUN] Would prune: {ch_dir.parent.name}/{ch_dir.name} ({file_count} files, {dir_size / (1024 * 1024):.1f} MB)")
+            print(f"  [DRY-RUN] Would prune: {local_path.parent.name}/{local_path.name} ({file_count} files, {dir_size / (1024 * 1024):.1f} MB)")
         else:
             try:
-                shutil.rmtree(ch_dir)
-                print(f"  ✓ Pruned: {ch_dir.parent.name}/{ch_dir.name} ({file_count} files, {dir_size / (1024 * 1024):.1f} MB)")
+                if local_path.is_file():
+                    local_path.unlink()
+                else:
+                    shutil.rmtree(local_path)
+                print(f"  ✓ Pruned: {local_path.parent.name}/{local_path.name} ({file_count} files, {dir_size / (1024 * 1024):.1f} MB)")
             except Exception as e:
-                print(f"  [Warning] Failed to prune {ch_dir}: {e}", file=sys.stderr)
+                print(f"  [Warning] Failed to prune {local_path}: {e}", file=sys.stderr)
                 continue
 
         pruned_count += 1
@@ -770,7 +1006,13 @@ def main() -> None:
     if DRY_RUN:
         print("=== DRY RUN MODE ===\n")
 
+    print(f"Scanning downloads: {downloads.resolve()}...", flush=True)
     comics = scan_downloads(downloads)
+    print(
+        f"Scan complete: {len(comics)} comic(s), "
+        f"{sum(len(comic['chapters']) for comic in comics)} chapter(s) found.",
+        flush=True,
+    )
     if not comics:
         print("No comics found in downloads/")
         sys.exit(0)
@@ -797,6 +1039,49 @@ def main() -> None:
     items_updated = 0
     primary_source_id = None
 
+    def _supabase_upsert_chapter(ch: dict, story_id: str | None, slug: str) -> None:
+        if not ch.get("sync_pending", True):
+            return
+        ch_num = ch["number"]
+        r2_prefix = f"chapters/{slug}/ch_{ch_num}"
+
+        if ch["format"] == "cbz":
+            content = json.dumps([r2_asset_url(r2_prefix, ch["file"])])
+        else:
+            content = json.dumps([r2_asset_url(r2_prefix, img) for img in ch["images"]])
+
+        chapter_payload = {
+            "story_id": story_id,
+            "chapter_number": ch_num,
+            "title": ch["title"],
+            "content": content,
+            "status": "published",
+            "published_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        def _do_upsert() -> None:
+            if sb_enabled() and not DRY_RUN:
+                try:
+                    supabase_post("chapters", chapter_payload)
+                except requests.HTTPError as e:
+                    if e.response is not None and e.response.status_code == 409:
+                        supabase_patch(
+                            "chapters",
+                            {
+                                "story_id": f"eq.{story_id}",
+                                "chapter_number": f"eq.{ch_num}",
+                            },
+                            chapter_payload,
+                        )
+                    else:
+                        raise
+                except Exception:
+                    raise
+            elif DRY_RUN:
+                return
+
+        with_retry(_do_upsert, f"Supabase chapter {ch_num} insert", max_retries=3, base_delay=1.0)
+
     try:
         for comic in comics:
             title = comic["title"]
@@ -805,6 +1090,8 @@ def main() -> None:
             category = comic["category"]
             description = comic["description"]
             url = comic["url"]
+            meta = comic["meta"]
+            meta_path = comic["meta_path"]
 
             if url and not primary_source_id and sb_enabled():
                 primary_source_id = get_or_create_crawler_source(url)
@@ -816,8 +1103,13 @@ def main() -> None:
             if category and category != "Unknown":
                 print(f"  Category: {category}")
 
-            first_ch = comic["chapters"][0]
-            cover_url = f"{R2_PUBLIC_URL}/chapters/{slug}/ch_{first_ch['number']}/{first_ch['images'][0].name}"
+            cover_url = None
+            if comic["chapters"] and comic["chapters"][0]["format"] == "images":
+                first_ch = comic["chapters"][0]
+                cover_url = r2_asset_url(
+                    f"chapters/{slug}/ch_{first_ch['number']}",
+                    first_ch["images"][0],
+                )
 
             story_id = (
                 get_or_create_story(title, slug, cover_url, author, category, description)
@@ -828,57 +1120,88 @@ def main() -> None:
                 print("  ERROR: Could not get/create story")
                 continue
 
-            existing_chapters = get_existing_chapter_numbers(story_id) if (sb_enabled() and not DRY_RUN) else set()
+            chapter_batches = chunk_chapters([ch for ch in comic["chapters"] if ch.get("sync_pending", True)])
+            for batch in chapter_batches:
+                r2_batch = []
+                r2_ready: dict[float | int, bool] = {}
+                for ch in batch:
+                    if not ch.get("sync_pending", True):
+                        continue
+                    ch_num = ch["number"]
+                    r2_prefix = f"chapters/{slug}/ch_{ch_num}"
+                    if chapter_already_on_r2(ch, slug):
+                        print(f"  [Skip] Ch {ch_num} already exists on R2 ({r2_prefix})")
+                        r2_ready[ch_num] = True
+                        continue
+                    r2_batch.append(ch)
 
-            for ch in comic["chapters"]:
-                items_seen += 1
-                ch_num = ch["number"]
+                if r2_batch:
+                    with ThreadPoolExecutor(max_workers=R2_MAX_WORKERS) as ex:
+                        futures = [
+                            ex.submit(lambda ch=ch: (
+                                upload_cbz_to_r2(ch["file"], f"chapters/{slug}/ch_{ch['number']}", compare_existing=True)
+                                if ch["format"] == "cbz"
+                                else upload_to_r2(ch["dir"], f"chapters/{slug}/ch_{ch['number']}", compare_existing=True)
+                            )) for ch in r2_batch
+                        ]
+                        for ch, future in zip(r2_batch, futures):
+                            upload_ok = future.result()
+                            r2_ready[ch["number"]] = upload_ok
+                            if not upload_ok:
+                                print("  [ERROR] Upload failed in batch; dropping chapter from sync queue")
+                                continue
+                            items_seen += 1
 
-                if ch_num in existing_chapters:
-                    continue
-
-                r2_prefix = f"chapters/{slug}/ch_{ch_num}"
-
-                print(f"  Uploading ch {ch_num} ({len(ch['images'])} images)...")
-                if not upload_to_r2(ch["dir"], r2_prefix):
-                    print(f"  ERROR: Upload failed for ch {ch_num}")
-                    continue
-
-                content = json.dumps([f"{R2_PUBLIC_URL}/{r2_prefix}/{img.name}" for img in ch["images"]])
-
-                if sb_enabled() and not DRY_RUN:
-                    try:
-                        supabase_post(
-                            "chapters",
-                            {
-                                "story_id": story_id,
-                                "chapter_number": ch_num,
-                                "title": ch["title"],
-                                "content": content,
-                                "status": "published",
-                                "published_at": datetime.now(timezone.utc).isoformat(),
-                            },
-                        )
+                supabase_batch = []
+                for ch in batch:
+                    if not ch.get("sync_pending", True):
+                        continue
+                    if not r2_ready.get(ch["number"], False):
+                        print(f"  [Skip] Ch {ch['number']} not confirmed on R2; skipping Supabase insert")
+                        continue
+                    if not sb_enabled() or DRY_RUN:
                         items_created += 1
-                        print(f"  ✓ Ch {ch_num} synced to Supabase")
-                    except requests.HTTPError as e:
-                        if e.response is None or e.response.status_code != 409:
-                            print(f"  ERROR inserting ch {ch_num}: {e}", file=sys.stderr)
-                            continue
-                else:
-                    items_created += 1
-                    print(f"  [DRY-RUN] Would insert ch {ch_num} with {len(ch['images'])} images")
+                        if ch["format"] == "cbz":
+                            print(f"  [DRY-RUN] Would insert ch {ch['number']} with CBZ URL")
+                        else:
+                            print(f"  [DRY-RUN] Would insert ch {ch['number']} with {len(ch['images'])} images")
+                        continue
+                    supabase_batch.append(ch)
 
-                item_info = {
-                    "comic": title,
-                    "author": author,
-                    "category": category,
-                    "chapter": ch["title"],
-                    "ch_num": ch_num,
-                    "dir": ch["dir"],
-                }
-                summary.append(item_info)
-                synced_for_prune.append(item_info)
+                if supabase_batch:
+                    with ThreadPoolExecutor(max_workers=SUPABASE_MAX_WORKERS) as ex:
+                        futures = [
+                            ex.submit(_supabase_upsert_chapter, ch, story_id, slug)
+                            for ch in supabase_batch
+                        ]
+                        for ch, future in zip(supabase_batch, futures):
+                            try:
+                                future.result()
+                                items_created += 1
+                                print(f"  ✓ Ch {ch['number']} synced to Supabase")
+                                item_info = {
+                                    "comic": title,
+                                    "author": author,
+                                    "category": category,
+                                    "chapter": ch["title"],
+                                    "ch_num": ch["number"],
+                                    "dir": ch["dir"] if ch["format"] == "images" else ch["file"],
+                                }
+                                summary.append(item_info)
+                                synced_for_prune.append(item_info)
+                                chapters_manifest = meta.setdefault("chapters", {})
+                                if not isinstance(chapters_manifest, dict):
+                                    chapters_manifest = {}
+                                    meta["chapters"] = chapters_manifest
+                                chapters_manifest[chapter_key(ch["number"])] = {
+                                    "number": ch["number"],
+                                    "title": ch["title"],
+                                    "url": chapters_manifest.get(chapter_key(ch["number"]), {}).get("url", ""),
+                                    "synced": True,
+                                }
+                                save_meta(meta_path, meta)
+                            except Exception as e:
+                                print(f"  ERROR inserting ch {ch['number']}: {e}", file=sys.stderr)
 
         # Backup & Prune
         drive_ok = backup_to_drive(downloads)

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import requests
 import sync_pipeline as sp
 from sync_pipeline import slugify, extract_chapter_number, scan_downloads, prune_local_chapters, backup_to_drive, build_discord_payload
 
@@ -26,8 +27,59 @@ class TestSyncPipelineHelpers(unittest.TestCase):
         self.assertEqual(extract_chapter_number("Season 2 Ch 15"), 15)
         self.assertEqual(extract_chapter_number("Prologue"), None)
 
+    def test_chunk_chapters_defaults_to_ten_per_batch(self):
+        many = list(range(1, 26))
+        batches = sp.chunk_chapters(many, 10)
+        self.assertEqual(len(batches), 3)
+        self.assertEqual(batches[0], list(range(1, 11)))
+        self.assertEqual(batches[-1], list(range(21, 26)))
+
+    def test_supabase_worker_limit_is_configured_separately(self):
+        self.assertEqual(sp.R2_MAX_WORKERS, 4)
+        self.assertEqual(sp.SUPABASE_MAX_WORKERS, 2)
+
+    def test_retry_on_http_429_and_5xx_uses_exponential_backoff(self):
+        calls = {"count": 0}
+
+        def fake_get(url, **kwargs):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                resp = MagicMock()
+                resp.status_code = 429 if calls["count"] == 1 else 500
+                raise requests.HTTPError(response=resp)
+            return {"ok": True}
+
+        with patch("sync_pipeline.time.sleep") as mock_sleep:
+            result = sp.with_retry(lambda: fake_get("https://example.com"), "test", max_retries=3)
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(mock_sleep.call_count, 2)
+        self.assertGreaterEqual(mock_sleep.call_args_list[0].args[0], 1.0)
+        self.assertLess(mock_sleep.call_args_list[0].args[0], 2.0)
+        self.assertGreaterEqual(mock_sleep.call_args_list[1].args[0], 2.0)
+
 
 class TestScanDownloads(unittest.TestCase):
+    def test_scan_marks_manifest_synced_chapter_as_not_pending(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            comic_dir = Path(tmpdir) / "Manifest Comic"
+            comic_dir.mkdir()
+            (comic_dir / "meta.json").write_text(json.dumps({
+                "chapters": {
+                    "1": {"number": 1, "synced": True},
+                    "2": {"number": 2, "synced": False},
+                }
+            }), encoding="utf-8")
+            for number in (1, 2):
+                chapter_dir = comic_dir / f"Chapter {number}"
+                chapter_dir.mkdir()
+                (chapter_dir / "001.jpg").write_bytes(b"image")
+
+            chapters = scan_downloads(Path(tmpdir))[0]["chapters"]
+
+            self.assertEqual(len(chapters), 1)
+            self.assertEqual(chapters[0]["number"], 2)
+            self.assertTrue(chapters[0]["sync_pending"])
+
     def test_scan_with_meta_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             comic_dir = Path(tmpdir) / "Test Comic"
@@ -55,6 +107,21 @@ class TestScanDownloads(unittest.TestCase):
             self.assertEqual(c["url"], "https://nettruyen.gg/truyen/test-comic")
             self.assertEqual(len(c["chapters"]), 1)
             self.assertEqual(c["chapters"][0]["number"], 1)
+
+    def test_scan_cbz_chapter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            comic_dir = Path(tmpdir) / "CBZ Comic"
+            comic_dir.mkdir()
+            cbz_file = comic_dir / "Chapter 001.cbz"
+            cbz_file.write_bytes(b"mock-cbz")
+
+            comics = scan_downloads(Path(tmpdir))
+
+            self.assertEqual(len(comics), 1)
+            chapter = comics[0]["chapters"][0]
+            self.assertEqual(chapter["number"], 1)
+            self.assertEqual(chapter["format"], "cbz")
+            self.assertEqual(chapter["file"], cbz_file)
 
 
 class TestSupabaseOperations(unittest.TestCase):
@@ -192,6 +259,23 @@ class TestR2Operations(unittest.TestCase):
                 mock_client.upload_file.assert_called_once()
                 args, kwargs = mock_client.upload_file.call_args
                 self.assertEqual(kwargs["ExtraArgs"]["ContentType"], "image/webp")
+
+    def test_upload_cbz_to_r2_with_archive_headers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cbz_file = Path(tmpdir) / "Chapter 001.cbz"
+            cbz_file.write_bytes(b"mock-cbz-bytes")
+
+            mock_client = MagicMock()
+            mock_client.list_objects_v2.return_value = {"Contents": []}
+
+            with patch("sync_pipeline._get_r2_client", return_value=mock_client):
+                success = sp.upload_cbz_to_r2(cbz_file, "chapters/test/ch_1")
+
+            self.assertTrue(success)
+            mock_client.upload_file.assert_called_once()
+            args, kwargs = mock_client.upload_file.call_args
+            self.assertEqual(args[2], "chapters/test/ch_1/Chapter 001.cbz")
+            self.assertEqual(kwargs["ExtraArgs"]["ContentType"], "application/vnd.comicbook+zip")
 class TestHealthCheck(unittest.TestCase):
     def test_run_health_check_healthy(self):
         mock_r2 = MagicMock()

@@ -1,6 +1,7 @@
 import unittest
 import os
 import tempfile
+import requests
 from unittest.mock import patch, MagicMock
 from PIL import Image
 
@@ -30,6 +31,53 @@ class TestComicCrawler(unittest.TestCase):
         self.assertIn("author", fallback_cfg["selectors"])
         self.assertIn("category", fallback_cfg["selectors"])
         self.assertIn("description", fallback_cfg["selectors"])
+
+    def test_truyenqq_config_and_chapters(self):
+        loader = ConfigLoader()
+        site_cfg = loader.get_site_config("https://truyenqqko.com/truyen-tranh/free-draw-5993")
+        self.assertEqual(site_cfg["name"], "TruyenQQ")
+        self.assertIn("works-chapter-item", site_cfg["selectors"]["chapter_list"])
+
+        crawler = ComicCrawler()
+        sample_html = """
+        <div class="works-chapter-list">
+            <div class="works-chapter-item"><a href="/truyen-tranh/free-draw-5993-chap-2">Chương 2</a></div>
+            <div class="works-chapter-item"><a href="/truyen-tranh/free-draw-5993-chap-1">Chương 1</a></div>
+        </div>
+        """
+        with patch.object(crawler, "_fetch_html", return_value=sample_html):
+            info = crawler.parse_comic_info("https://truyenqqko.com/truyen-tranh/free-draw-5993")
+        self.assertEqual(len(info["chapters"]), 2)
+        self.assertEqual(info["chapters"][0]["title"], "Chapter 001")
+        self.assertEqual(info["chapters"][1]["title"], "Chapter 002")
+
+    def test_truyenqq_com_vn_config_chapters_and_images(self):
+        loader = ConfigLoader()
+        site_cfg = loader.get_site_config("https://truyenqq.com.vn/ai-bao-han-tu-tien")
+        self.assertEqual(site_cfg["name"], "TruyenQQ")
+
+        crawler = ComicCrawler()
+        comic_html = """
+        <div id="chapter-list">
+            <a href="/ai-bao-han-tu-tien/chapter-2">Chapter 2</a>
+            <a href="/ai-bao-han-tu-tien/chapter-1">Chapter 1</a>
+        </div>
+        """
+        with patch.object(crawler, "_fetch_html", return_value=comic_html):
+            info = crawler.parse_comic_info("https://truyenqq.com.vn/ai-bao-han-tu-tien")
+        self.assertEqual(len(info["chapters"]), 2)
+
+        chapter_html = """
+        <div class="reading-list">
+            <img src="/images/loading.svg" data-src="https://cdn.site/001.jpg" />
+            <img src="/images/loading.svg" data-src="https://cdn.site/002.jpg" />
+        </div>
+        """
+        with patch.object(crawler, "_fetch_html", return_value=chapter_html):
+            images = crawler.extract_chapter_images(
+                "https://truyenqq.com.vn/ai-bao-han-tu-tien/chapter-1", site_cfg
+            )
+        self.assertEqual(images, ["https://cdn.site/001.jpg", "https://cdn.site/002.jpg"])
 
     def test_parse_comic_info_mocked(self):
         crawler = ComicCrawler()
@@ -130,6 +178,19 @@ class TestComicCrawler(unittest.TestCase):
     def test_context_manager(self):
         with ComicCrawler() as crawler:
             self.assertIsNotNone(crawler.session)
+
+    def test_fetch_html_retries_transient_connection_error(self):
+        crawler = ComicCrawler()
+        response = MagicMock(text="<html>ok</html>")
+        response.raise_for_status.return_value = None
+        connection_error = requests.ConnectionError("temporary DNS failure")
+        with patch.object(crawler.session, "get", side_effect=[connection_error, connection_error, response]) as get:
+            with patch("comic_crawler.core.time.sleep") as sleep:
+                self.assertEqual(crawler._fetch_html("https://example.com", {}), "<html>ok</html>")
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(sleep.call_args_list[0].args, (1,))
+        self.assertEqual(sleep.call_args_list[1].args, (2,))
+        crawler.close()
 
     def test_is_chapter_downloaded(self):
         crawler = ComicCrawler()
