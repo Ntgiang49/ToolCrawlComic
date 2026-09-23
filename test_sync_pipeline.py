@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import requests
 import sync_pipeline as sp
 from sync_pipeline import slugify, extract_chapter_number, scan_downloads, prune_local_chapters, backup_to_drive, build_discord_payload
 
@@ -25,6 +26,36 @@ class TestSyncPipelineHelpers(unittest.TestCase):
         self.assertEqual(extract_chapter_number("Vol. 1 Chapter 12"), 12)
         self.assertEqual(extract_chapter_number("Season 2 Ch 15"), 15)
         self.assertEqual(extract_chapter_number("Prologue"), None)
+
+    def test_chunk_chapters_defaults_to_ten_per_batch(self):
+        many = list(range(1, 26))
+        batches = sp.chunk_chapters(many, 10)
+        self.assertEqual(len(batches), 3)
+        self.assertEqual(batches[0], list(range(1, 11)))
+        self.assertEqual(batches[-1], list(range(21, 26)))
+
+    def test_supabase_worker_limit_is_configured_separately(self):
+        self.assertEqual(sp.R2_MAX_WORKERS, 4)
+        self.assertEqual(sp.SUPABASE_MAX_WORKERS, 2)
+
+    def test_retry_on_http_429_and_5xx_uses_exponential_backoff(self):
+        calls = {"count": 0}
+
+        def fake_get(url, **kwargs):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                resp = MagicMock()
+                resp.status_code = 429 if calls["count"] == 1 else 500
+                raise requests.HTTPError(response=resp)
+            return {"ok": True}
+
+        with patch("sync_pipeline.time.sleep") as mock_sleep:
+            result = sp.with_retry(lambda: fake_get("https://example.com"), "test", max_retries=3)
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(mock_sleep.call_count, 2)
+        self.assertGreaterEqual(mock_sleep.call_args_list[0].args[0], 1.0)
+        self.assertLess(mock_sleep.call_args_list[0].args[0], 2.0)
+        self.assertGreaterEqual(mock_sleep.call_args_list[1].args[0], 2.0)
 
 
 class TestScanDownloads(unittest.TestCase):
